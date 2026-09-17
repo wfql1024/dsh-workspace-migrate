@@ -67,10 +67,14 @@ for (const mutation of selected) {
     fs.writeFileSync(file, original)
     if (fs.existsSync(backup)) fs.unlinkSync(backup)
   }
-  const caught = result.status !== 0 && result.failures > 0
+  const caught = result.status !== 0
   if (!caught) uncaught += 1
+  // A mutation may be caught either by an assertion or by crashing the suite outright (for
+  // example when a guard that was added on purpose throws). Both are detection; a crash is
+  // labelled so it is visible that no assertion was involved.
+  const how = result.failures > 0 ? `${result.failures} failing check(s)` : 'crashed the suite'
   console.log(
-    `  ${caught ? 'caught ' : 'UNCAUGHT'}  ${mutation.name.padEnd(22)} ${mutation.suite.padEnd(20)} ${result.failures} failing check(s)  ${result.verdict}`,
+    `  ${caught ? 'caught ' : 'UNCAUGHT'}  ${mutation.name.padEnd(24)} ${mutation.suite.padEnd(20)} ${how.padEnd(20)} ${result.verdict}`,
   )
 }
 

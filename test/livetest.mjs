@@ -86,11 +86,23 @@ function makeHome(label, sessionIds, options = {}) {
   const oldKey = projectKeyOf(from)
   const oldKeyDir = path.join(sessionsRoot, oldKey)
   const before = {}
+  const beforeGenerations = {}
+  // DSH can hold several generation logs for one session in the same directory: it writes a new
+  // generation when it upgrades the log format and keeps the older file as history. `locate()`
+  // hands out the newest, so that is the one a live writer appends to.
+  const generations = Array.isArray(options.generations) ? [...options.generations].sort((a, b) => a - b) : [3]
   for (const id of sessionIds) {
     const dir = path.join(oldKeyDir, id)
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(path.join(dir, 'session.v3.jsonl.zstd'), buildLog(id, from, 3))
-    before[id] = splitFrames(fs.readFileSync(path.join(dir, 'session.v3.jsonl.zstd')))
+    beforeGenerations[id] = {}
+    for (const version of generations) {
+      const name = version === 0 ? 'session.jsonl.zstd' : `session.v${version}.jsonl.zstd`
+      fs.writeFileSync(path.join(dir, name), buildLog(id, from, version))
+      beforeGenerations[id][name] = splitFrames(fs.readFileSync(path.join(dir, name)))
+    }
+    const newest = generations[generations.length - 1]
+    const newestName = newest === 0 ? 'session.jsonl.zstd' : `session.v${newest}.jsonl.zstd`
+    before[id] = beforeGenerations[id][newestName]
   }
 
   const workspaceId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
@@ -115,7 +127,7 @@ function makeHome(label, sessionIds, options = {}) {
   for (const id of sessionIds) {
     fs.writeFileSync(path.join(perDir, `${id}.json`), JSON.stringify({ version: 7, record: { identity: { cwd: from }, rows: {} } }, null, 2))
   }
-  return { root, dshHome, sessionsRoot, storagesRoot, from, to, oldKey, oldKeyDir, workspaceId, before }
+  return { root, dshHome, sessionsRoot, storagesRoot, from, to, oldKey, oldKeyDir, workspaceId, before, beforeGenerations }
 }
 
 /**
@@ -645,7 +657,7 @@ console.log('\n[13] a running session is relocated in process and its writer ret
 // ── a running session's relocation is undone when a later layer fails ───────
 console.log('\n[14] a failed memory layer puts a RUNNING session back where it was')
 {
-  const home = makeHome('liveundo', ['session-1'], { destinationExists: false })
+  const home = makeHome('liveundo', ['session-1'], { destinationExists: false, generations: [0, 3] })
   // failAttach makes the last layer fail, so every earlier layer must be unwound — including
   // the live writer, whose routing would otherwise keep pointing at a file that moved back.
   const registry = fakeRegistry(home, { failAttach: true })
@@ -662,6 +674,12 @@ console.log('\n[14] a failed memory layer puts a RUNNING session back where it w
   ok('fails', result.ok === false, JSON.stringify(result.stage))
   ok('blames the memory layer', result.stage === 'memory-layer', String(result.stage))
   ok('the artifact is back under the old projectKey', fs.existsSync(path.join(home.oldKeyDir, 'session-1')))
+  ok('a live undo brings every generation back', (() => {
+    const dir = path.join(home.oldKeyDir, 'session-1')
+    if (!fs.existsSync(dir)) return false
+    const names = fs.readdirSync(dir).sort()
+    return names.join(',') === 'session.jsonl.zstd,session.v3.jsonl.zstd'
+  })())
   ok('the restored artifact is byte-identical', (() => {
     const frames = splitFrames(fs.readFileSync(path.join(home.oldKeyDir, 'session-1', 'session.v3.jsonl.zstd')))
     return frames.length === home.before['session-1'].length && frames.every((f, i) => f.equals(home.before['session-1'][i]))
@@ -740,6 +758,51 @@ console.log('\n[16] a real project-directory move leaves nothing behind at the s
   ok('a non-empty destination is still refused', refused.ok === false && /already exists/.test(String(refused.error)), JSON.stringify(refused))
   ok('the refused move changed nothing', fs.existsSync(path.join(from, 'marker.txt')) && fs.existsSync(path.join(to, 'occupied.txt')))
   fs.rmSync(root, { recursive: true, force: true })
+}
+
+// ── a live session whose directory holds SEVERAL generations ────────────────
+//
+// Found on a real host: a running conversation whose directory held both
+// `session.jsonl.zstd` (v0) and `session.v3.jsonl.zstd` (v3). Moving only the generation the
+// writer held left the other one under the old project key, and DSH then refused the session
+// with "duplicate JSONL session id ... appears in multiple project directories" the moment the
+// registry re-read its headers — at the memory layer, after the project directory had moved.
+console.log('\n[17] a live session with several generation logs moves them all')
+{
+  const home = makeHome('gens', ['session-1'], { generations: [0, 3] })
+  const registry = fakeRegistry(home)
+  const services = fakeServices({
+    registry,
+    liveSessions: ['session-1'],
+    rebindableWriters: true,
+    sessionsRoot: home.sessionsRoot,
+    cwdBySession: { 'session-1': home.from },
+  })
+
+  const result = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to }))
+
+  ok('succeeds', result.ok === true, JSON.stringify(result.blockers ?? result))
+  // The invariant DSH itself enforces on every scan: one id, one project directory.
+  const keysHolding = (id) =>
+    fs.existsSync(home.sessionsRoot)
+      ? fs
+          .readdirSync(home.sessionsRoot)
+          .filter((key) => fs.existsSync(path.join(home.sessionsRoot, key, id)))
+      : []
+  ok('the session id appears under exactly one project key', keysHolding('session-1').length === 1, JSON.stringify(keysHolding('session-1')))
+  ok('and it is the new one', keysHolding('session-1')[0] === projectKeyOf(home.to), JSON.stringify(keysHolding('session-1')))
+
+  const toDir = path.join(home.sessionsRoot, projectKeyOf(home.to), 'session-1')
+  ok('both generations moved', fs.existsSync(path.join(toDir, 'session.jsonl.zstd')) && fs.existsSync(path.join(toDir, 'session.v3.jsonl.zstd')), JSON.stringify(fs.existsSync(toDir) ? fs.readdirSync(toDir) : 'missing dir'))
+  ok('the old session directory is gone', !fs.existsSync(path.join(home.oldKeyDir, 'session-1')))
+
+  for (const name of ['session.jsonl.zstd', 'session.v3.jsonl.zstd']) {
+    const frames = splitFrames(fs.readFileSync(path.join(toDir, name)))
+    const beforeFrames = home.beforeGenerations['session-1'][name]
+    ok(`${name}: frames after 0 are byte-identical`, frames.length === beforeFrames.length && frames.slice(1).every((f, i) => f.equals(beforeFrames[i + 1])))
+    ok(`${name}: the header cwd is the new path`, zlib.zstdDecompressSync(frames[0]).toString('utf8').includes(home.to.replace(/\\/g, '\\\\')))
+  }
+  fs.rmSync(home.root, { recursive: true, force: true })
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

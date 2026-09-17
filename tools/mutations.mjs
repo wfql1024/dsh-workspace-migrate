@@ -26,7 +26,7 @@ export const MUTATIONS = [
     file: 'lib/live-move.mjs',
     suite: 'test/livetest.mjs',
     breaks: 'the emptied session directory is left under the old project key',
-    from: 'removeIfEmpty(dirname(fromFile))\n  removeIfEmpty(dirname(dirname(fromFile)))',
+    from: 'removeIfEmpty(fromDir)\n  removeIfEmpty(dirname(fromDir))',
     to: 'void 0 /* MUTATION: old directories left behind */',
   },
   {
@@ -36,6 +36,14 @@ export const MUTATIONS = [
     breaks: 'the replacement header adopts this module realm\'s Object.prototype, which DSH rejects',
     from: '  const next = Object.create(prototype === undefined ? null : prototype)\n  Object.assign(next, source, { cwd })\n  return Object.freeze(next)',
     to: '  return Object.freeze(Object.assign({}, source, { cwd })) /* MUTATION: realm-losing copy */',
+  },
+  {
+    name: 'companions-left-behind',
+    file: 'lib/live-move.mjs',
+    suite: 'test/livetest.mjs',
+    breaks: 'only the generation the live writer holds is moved, so the session id stays in two project directories',
+    from: '  for (const name of companions) {\n    const movedCompanion = relocateSessionLog(join(fromDir, name), join(toDir, name), newCwd)\n    alsoMoved.push({ name, frameCount: movedCompanion.frameCount, bytes: movedCompanion.bytes })\n  }',
+    to: '  void companions /* MUTATION: only the writer\'s generation is moved */',
   },
   {
     name: 'undo-session-header',
