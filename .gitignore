@@ -1,0 +1,6 @@
+node_modules/
+*.mutbak
+*.refactor-bak
+*.tgz
+# Development-only hot-reload marker honoured by index.js; never part of a release.
+DEV_RELOAD

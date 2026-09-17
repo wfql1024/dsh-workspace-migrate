@@ -1,0 +1,465 @@
+#!/usr/bin/env node
+/**
+ * Self-test for dsh-workspace-migrate against a synthetic DSH home.
+ * Never touches the real $DSH_HOME. Proves plan/apply/verify/rollback and, above all,
+ * that only frame 0 of each session log changes and every later frame stays byte-identical.
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import zlib from 'node:zlib'
+import crypto from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+
+// The engine under the package's lib/, one level up from this test.
+const candidates = [
+  new URL('../lib/dsh-workspace-migrate.mjs', import.meta.url),
+]
+const ENGINE =
+  process.argv[2] ?? fileURLToPath(candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[1])
+const NODE = process.execPath
+const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+
+let failures = 0
+let checks = 0
+const ok = (name, condition, detail = '') => {
+  checks++
+  if (!condition) {
+    failures++
+    console.log(`  FAIL  ${name}${detail ? `  ${detail}` : ''}`)
+  } else {
+    console.log(`  pass  ${name}${detail ? `  ${detail}` : ''}`)
+  }
+}
+
+// ── independent frame splitter (byte scan), deliberately a DIFFERENT algorithm from the
+//    engine's header-grammar parser, so agreement is real evidence.
+function splitFramesByScan(buf) {
+  const offsets = []
+  let i = 0
+  while ((i = buf.indexOf(MAGIC, i)) >= 0) {
+    offsets.push(i)
+    i++
+  }
+  return offsets.map((s, k) => buf.subarray(s, k + 1 < offsets.length ? offsets[k + 1] : buf.length))
+}
+
+function projectKey(cwd) {
+  let readable = ''
+  let separatorRun = false
+  for (let i = 0; i < cwd.length; i++) {
+    const code = cwd.charCodeAt(i)
+    const ch = String.fromCharCode(code)
+    if (ch === '/' || ch === '\\' || ch === ':') {
+      if (!separatorRun) readable += '-'
+      separatorRun = true
+    } else if (ch !== '~' && /^[A-Za-z0-9._-]$/.test(ch)) {
+      readable += ch
+      separatorRun = false
+    } else {
+      readable += '~' + code.toString(16).toUpperCase().padStart(4, '0')
+      separatorRun = false
+    }
+  }
+  return `--${(readable.replace(/^-+/, '') || 'root').slice(0, 251)}--`
+}
+
+function frame(text) {
+  return zlib.zstdCompressSync(Buffer.from(text, 'utf8'))
+}
+
+/** Build a realistic multi-frame session log: header frame + one frame per event batch. */
+function buildLog(id, cwd, { version, events }) {
+  const header =
+    version === 0
+      ? { type: 'session', version: 0, id, createdAt: 1786000000000, cwd, delegationDepth: 0, agentPreset: 'standard' }
+      : { type: 'session', version: 3, id, createdAt: 1786000000000, cwd, isSeeded: false, delegationDepth: 0, agentPreset: 'standard' }
+  const parts = [frame(`${JSON.stringify(header)}\n`)]
+  for (const batch of events) {
+    parts.push(frame(batch.map((event) => JSON.stringify(event)).join('\n') + '\n'))
+  }
+  return Buffer.concat(parts)
+}
+
+function run(args) {
+  const result = spawnSync(NODE, [ENGINE, ...args], { encoding: 'utf8', windowsHide: true })
+  let json
+  try {
+    json = JSON.parse(result.stdout)
+  } catch {
+    json = undefined
+  }
+  return { code: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', json }
+}
+
+function freshRoot(label) {
+  const dir = path.join(os.tmpdir(), `dsh-migrate-selftest-${label}-${crypto.randomUUID().slice(0, 8)}`)
+  fs.rmSync(dir, { recursive: true, force: true })
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+// ── scenario construction ────────────────────────────────────────────────────
+function scenario(root, { sessions, foreignSession = false, duplicate = false, locks = false }) {
+  const dshHome = path.join(root, 'dsh-home')
+  const sessionsRoot = path.join(dshHome, 'sessions')
+  const storagesRoot = path.join(dshHome, 'storages')
+  const projectRoot = path.join(root, 'projects')
+  const from = path.join(projectRoot, 'old', 'DemoProject')
+  const to = path.join(projectRoot, 'new', 'DemoProject')
+  fs.mkdirSync(sessionsRoot, { recursive: true })
+  fs.mkdirSync(storagesRoot, { recursive: true })
+  fs.mkdirSync(from, { recursive: true })
+  fs.writeFileSync(path.join(from, 'readme.txt'), 'hello\n')
+  fs.mkdirSync(path.join(from, 'src', 'nested'), { recursive: true })
+  fs.writeFileSync(path.join(from, 'src', 'nested', 'a.txt'), 'a\n'.repeat(500))
+
+  const oldKey = projectKey(from)
+  const newKey = projectKey(to)
+  const oldKeyDir = path.join(sessionsRoot, oldKey)
+  fs.mkdirSync(oldKeyDir, { recursive: true })
+
+  const built = []
+  for (const spec of sessions) {
+    const dir = path.join(oldKeyDir, spec.id)
+    fs.mkdirSync(dir, { recursive: true })
+    const events = [
+      [{ type: 'message', role: 'user', text: 'first prompt' }],
+      [
+        { type: 'message', role: 'assistant', text: 'reply one' },
+        { type: 'tool', name: 'read', arg: 'from' },
+      ],
+      [{ type: 'message', role: 'user', text: 'second prompt WITH a path ' + from }],
+    ]
+    for (const version of spec.versions) {
+      fs.writeFileSync(path.join(dir, version === 0 ? 'session.jsonl.zstd' : `session.v${version}.jsonl.zstd`), buildLog(spec.id, spec.cwd ?? from, { version, events }))
+    }
+    built.push({ ...spec, dir })
+  }
+
+  if (foreignSession) {
+    const foreignId = 'session-foreign-0000-0000-000000000001'
+    const dir = path.join(oldKeyDir, foreignId)
+    fs.mkdirSync(dir, { recursive: true })
+    const elsewhere = path.join(projectRoot, 'elsewhere')
+    fs.writeFileSync(path.join(dir, 'session.v3.jsonl.zstd'), buildLog(foreignId, elsewhere, { version: 3, events: [[]] }))
+    built.push({ id: foreignId, dir, foreign: true })
+  }
+
+  if (duplicate) {
+    const dupId = sessions[0].id
+    const newKeyDir = path.join(sessionsRoot, newKey)
+    fs.mkdirSync(path.join(newKeyDir, dupId), { recursive: true })
+    fs.writeFileSync(path.join(newKeyDir, dupId, 'session.v3.jsonl.zstd'), buildLog(dupId, to, { version: 3, events: [[]] }))
+  }
+
+  if (locks) {
+    // A lease lock lives inside the session directory it protects.
+    fs.writeFileSync(path.join(oldKeyDir, sessions[0].id, 'session.lock'), 'lease')
+  }
+
+  // storages
+  const workspaceId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+  const workspaces = {
+    [workspaceId]: {
+      path: from,
+      title: 'DemoProject',
+      sessionIds: sessions.map((s) => s.id),
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    },
+  }
+  const workspaceDoc = {
+    unit: { name: 'workspace', version: 2 },
+    global: { initialized: true, workspaceIds: [workspaceId], archivedSessionIds: [] },
+    tables: { workspaces },
+  }
+  fs.writeFileSync(path.join(storagesRoot, 'workspace.json'), JSON.stringify(workspaceDoc, null, 2))
+
+  const cacheSessions = {}
+  for (const spec of sessions) {
+    cacheSessions[spec.id] = {
+      identity: { createdAt: 1786000000000, cwd: from },
+      rows: { title: { ver: 1, seq: 4, val: 'A title' }, sessionStats: { ver: 1, seq: 4, val: { turns: 3 } } },
+    }
+  }
+  const cacheDoc = { unit: { name: 'session_projcache', version: 3 }, global: null, tables: { sessions: cacheSessions } }
+  fs.writeFileSync(path.join(storagesRoot, 'session_projcache.json'), JSON.stringify(cacheDoc, null, 2))
+
+  const perSessionDir = path.join(storagesRoot, 'session_projcache', 'sessions')
+  fs.mkdirSync(perSessionDir, { recursive: true })
+  for (const spec of sessions) {
+    fs.writeFileSync(
+      path.join(perSessionDir, `${spec.id}.json`),
+      JSON.stringify({ version: 7, record: { identity: { formatVersion: 3, createdAt: 1786000000000, cwd: from, isSeeded: false }, rows: { title: { ver: 1, seq: 4, val: null } } } }, null, 2),
+    )
+    // A document that legitimately mentions the old path as CONTENT must not be rewritten
+    // anywhere except the identified identity field.
+    fs.writeFileSync(
+      path.join(perSessionDir, `${spec.id}.unrelated.json`),
+      JSON.stringify({ note: `history mentions ${from} as text`, record: { identity: { cwd: 'C:\\somewhere\\else' } } }, null, 2),
+    )
+  }
+
+  return { root, dshHome, sessionsRoot, storagesRoot, from, to, oldKey, newKey, oldKeyDir, workspaces, workspaceId, built }
+}
+
+function framesOf(file) {
+  return splitFramesByScan(fs.readFileSync(file))
+}
+
+// ── Test A: full happy path ─────────────────────────────────────────────────
+console.log('\n[Test A] full migration: plan -> apply -> verify -> rollback')
+{
+  const root = freshRoot('A')
+  const env = scenario(root, {
+    sessions: [
+      { id: 'session-11111111-1111-1111-1111-111111111111', versions: [0, 3] },
+      { id: 'session-22222222-2222-2222-2222-222222222222', versions: [3] },
+    ],
+  })
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const plan = run(['plan', '--from', env.from, '--to', env.to, ...base])
+  ok('plan exits 0', plan.code === 0, plan.stderr.trim())
+  ok('plan is ok', plan.json?.ok === true)
+  ok('plan finds 2 sessions', plan.json?.sessions.toMigrate.length === 2)
+  ok('plan finds 5 metadata patches', plan.json?.metadata.patches.length === 5, `got ${plan.json?.metadata.patches.length}`)
+  ok('plan does not rewrite the unrelated cwd', !(plan.json?.metadata.patches ?? []).some((p) => p.file.includes('unrelated')))
+  ok('plan stages a runner', typeof plan.json?.stage?.applyCmd === 'string' && fs.existsSync(plan.json.stage.applyCmd))
+
+  const before = {}
+  for (const spec of env.built) {
+    for (const name of fs.readdirSync(spec.dir)) before[`${spec.id}/${name}`] = framesOf(path.join(spec.dir, name))
+  }
+
+  // verify BEFORE applying must read as "intact at the original path", never as damage
+  const preVerify = run(['verify', '--plan', plan.json.stage.planFile, ...base])
+  ok('verify before apply exits 0', preVerify.code === 0, JSON.stringify(preVerify.json?.failures))
+  ok('verify before apply auto-detects the original state', preVerify.json?.detectedState === 'original', preVerify.json?.detectedState)
+  ok('verify before apply explains it is not yet applied', (preVerify.json?.notes ?? []).some((n) => n.includes('NOT been applied')))
+  ok('verify before apply changes nothing', fs.existsSync(env.from) && fs.existsSync(env.oldKeyDir))
+
+  // apply must refuse while a DSH process is detectable (it is: this very node process is
+  // not dsh, but the real check is exercised through the lock below)
+  const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('apply exits 0', apply.code === 0, apply.stderr.trim() || JSON.stringify(apply.json?.error))
+  ok('apply status ok', apply.json?.status === 'ok', apply.json?.error ?? '')
+  ok('apply wrote a backup', fs.existsSync(apply.json?.backup?.dir ?? ''))
+  ok('apply verification passed', apply.json?.verification?.ok === true, JSON.stringify(apply.json?.verification?.failures))
+
+  const newKeyDir = path.join(env.sessionsRoot, env.newKey)
+  ok('old project key directory removed', !fs.existsSync(env.oldKeyDir))
+  ok('new project key directory exists', fs.existsSync(newKeyDir))
+  ok('both sessions under the new key', fs.readdirSync(newKeyDir).filter((n) => n.startsWith('session-')).length === 2)
+
+  // frame-level assertions
+  for (const spec of env.built) {
+    for (const name of fs.readdirSync(path.join(newKeyDir, spec.id))) {
+      const after = framesOf(path.join(newKeyDir, spec.id, name))
+      const originalFrames = before[`${spec.id}/${name}`]
+      ok(`${spec.id}/${name}: frame count preserved`, after.length === originalFrames.length, `${originalFrames.length} -> ${after.length}`)
+      const tailSame = after.slice(1).every((f, i) => f.equals(originalFrames[i + 1]))
+      ok(`${spec.id}/${name}: every frame after frame 0 is byte-identical`, tailSame)
+      const text = zlib.zstdDecompressSync(after[0]).toString('utf8')
+      ok(`${spec.id}/${name}: frame 0 is exactly one header line`, text.length > 0 && text.indexOf('\n') === text.length - 1)
+      const header = JSON.parse(text.slice(0, -1))
+      ok(`${spec.id}/${name}: header cwd updated`, header.cwd === env.to, header.cwd)
+      ok(`${spec.id}/${name}: header key order preserved`, Object.keys(header).join(',') === Object.keys(JSON.parse(zlib.zstdDecompressSync(originalFrames[0]).toString('utf8').slice(0, -1))).join(','))
+    }
+  }
+
+  // metadata
+  const ws = JSON.parse(fs.readFileSync(path.join(env.storagesRoot, 'workspace.json'), 'utf8'))
+  ok('workspace.json path updated', ws.tables.workspaces[env.workspaceId].path === env.to)
+  ok('workspace.json title untouched', ws.tables.workspaces[env.workspaceId].title === 'DemoProject')
+  ok('workspace.json sessionIds untouched', JSON.stringify(ws.tables.workspaces[env.workspaceId].sessionIds) === JSON.stringify(env.built.map((b) => b.id)))
+  const cache = JSON.parse(fs.readFileSync(path.join(env.storagesRoot, 'session_projcache.json'), 'utf8'))
+  ok('aggregate projcache cwd updated', cache.tables.sessions['session-11111111-1111-1111-1111-111111111111'].identity.cwd === env.to)
+  const perSession = JSON.parse(fs.readFileSync(path.join(env.storagesRoot, 'session_projcache', 'sessions', 'session-11111111-1111-1111-1111-111111111111.json'), 'utf8'))
+  ok('per-session projcache cwd updated', perSession.record.identity.cwd === env.to)
+  ok('per-session projcache rows preserved', perSession.record.rows.title.val === null)
+  const unrelated = JSON.parse(fs.readFileSync(path.join(env.storagesRoot, 'session_projcache', 'sessions', 'session-11111111-1111-1111-1111-111111111111.unrelated.json'), 'utf8'))
+  ok('unrelated document untouched (content path kept, foreign cwd kept)', unrelated.note.includes(env.from) && unrelated.record.identity.cwd === 'C:\\somewhere\\else')
+
+  // project moved
+  ok('project moved to destination', fs.existsSync(path.join(env.to, 'src', 'nested', 'a.txt')))
+  ok('project removed from source', !fs.existsSync(env.from))
+
+  // verify
+  const verify = run(['verify', '--plan', plan.json.stage.planFile, ...base])
+  ok('verify exits 0 after migration', verify.code === 0, JSON.stringify(verify.json?.failures))
+  ok('verify reports all checks pass', verify.json?.ok === true)
+  ok('verify ran a meaningful number of checks', (verify.json?.checked ?? 0) >= 10, `checked=${verify.json?.checked}`)
+
+  // rollback
+  const rollback = run(['rollback', '--plan', plan.json.stage.planFile, '--yes', ...base])
+  ok('rollback exits 0', rollback.code === 0, JSON.stringify(rollback.json?.verification?.failures))
+  ok('rollback verification passed (original state)', rollback.json?.verification?.ok === true)
+  ok('rollback restored the old key directory', fs.existsSync(env.oldKeyDir))
+  ok('rollback removed the new key directory', !fs.existsSync(newKeyDir))
+  ok('rollback moved the project back', fs.existsSync(path.join(env.from, 'src', 'nested', 'a.txt')))
+
+  for (const spec of env.built) {
+    for (const name of fs.readdirSync(path.join(env.oldKeyDir, spec.id))) {
+      const restored = framesOf(path.join(env.oldKeyDir, spec.id, name))
+      const original = before[`${spec.id}/${name}`]
+      ok(`${spec.id}/${name}: rollback restored the frames byte-for-byte`, restored.length === original.length && restored.every((f, i) => f.equals(original[i])))
+    }
+  }
+  const wsBack = JSON.parse(fs.readFileSync(path.join(env.storagesRoot, 'workspace.json'), 'utf8'))
+  ok('rollback restored workspace.json', wsBack.tables.workspaces[env.workspaceId].path === env.from)
+  const verifyOriginal = run(['verify', '--plan', plan.json.stage.planFile, '--expect', 'original', ...base])
+  ok('verify --expect original passes after rollback', verifyOriginal.json?.ok === true, JSON.stringify(verifyOriginal.json?.failures))
+}
+
+// ── Test B: a foreign session sharing the key directory is never moved ──────
+console.log('\n[Test B] foreign session in the same project key directory')
+{
+  const root = freshRoot('B')
+  const env = scenario(root, { sessions: [{ id: 'session-33333333-3333-3333-3333-333333333333', versions: [3] }], foreignSession: true })
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const plan = run(['plan', '--from', env.from, '--to', env.to, ...base])
+  ok('plan still ok with a foreign session', plan.json?.ok === true, JSON.stringify(plan.json?.errors))
+  ok('foreign session reported, not queued', plan.json?.sessions.toMigrate.length === 1 && plan.json?.sessions.foreign.length === 1)
+  const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('apply exits 0', apply.code === 0, apply.json?.error ?? apply.stderr.trim())
+  ok('foreign session left in the old key directory', fs.existsSync(path.join(env.oldKeyDir, 'session-foreign-0000-0000-000000000001')))
+  ok('old key directory kept because it is not empty', fs.existsSync(env.oldKeyDir))
+  ok('target session moved to the new key', fs.existsSync(path.join(env.sessionsRoot, env.newKey, 'session-33333333-3333-3333-3333-333333333333')))
+}
+
+// ── Test C: a duplicated session id is refused before any mutation ─────────
+console.log('\n[Test C] duplicate session id refuses safely')
+{
+  const root = freshRoot('C')
+  const env = scenario(root, { sessions: [{ id: 'session-44444444-4444-4444-4444-444444444444', versions: [3] }], duplicate: true })
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const plan = run(['plan', '--from', env.from, '--to', env.to, ...base])
+  ok('plan is blocked by the duplicate', plan.json?.ok === false && plan.json?.errors.some((e) => e.includes('duplicated')))
+  ok('plan still exits 1', plan.code === 1)
+  const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('apply refuses', apply.code === 1)
+  ok('nothing was mutated', fs.existsSync(path.join(env.oldKeyDir, 'session-44444444-4444-4444-4444-444444444444')) && fs.existsSync(env.from))
+}
+
+// ── Test D: a live session.lock blocks apply ───────────────────────────────
+console.log('\n[Test D] a live session.lock blocks apply')
+{
+  const root = freshRoot('D')
+  const env = scenario(root, { sessions: [{ id: 'session-55555555-5555-5555-5555-555555555555', versions: [3] }], locks: true })
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const plan = run(['plan', '--from', env.from, '--to', env.to, ...base])
+  const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('apply exits 1', apply.code === 1)
+  ok('apply blames the lease lock', (apply.json?.blockers ?? []).some((b) => b.includes('session.lock')), JSON.stringify(apply.json?.blockers))
+  ok('nothing was mutated', fs.existsSync(path.join(env.oldKeyDir, 'session-55555555-5555-5555-5555-555555555555')))
+  const forced = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', '--allow-lock', ...base])
+  ok('apply succeeds with --allow-lock', forced.code === 0, forced.json?.error ?? forced.stderr.trim())
+  ok('the lease file moved with its session directory', fs.existsSync(path.join(env.sessionsRoot, env.newKey, 'session-55555555-5555-5555-5555-555555555555', 'session.lock')))
+}
+
+// ── Test E: relocate-sessions (the live-caller entry point) ────────────────
+console.log('\n[Test E] relocate-sessions: scoped, frame-safe, and workspace.json is left alone')
+{
+  const root = freshRoot('E')
+  const movedId = 'session-66666666-6666-6666-6666-666666666666'
+  const keptId = 'session-77777777-7777-7777-7777-777777777777'
+  const env = scenario(root, { sessions: [{ id: movedId, versions: [0, 3] }, { id: keptId, versions: [3] }] })
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const reportFile = path.join(root, 'relocate-report.json')
+
+  // snapshot every session log BEFORE, plus workspace.json
+  const before = {}
+  for (const spec of env.built) {
+    for (const name of fs.readdirSync(spec.dir)) before[`${spec.id}/${name}`] = framesOf(path.join(spec.dir, name))
+  }
+  const workspacePath = path.join(env.storagesRoot, 'workspace.json')
+  const workspaceBefore = fs.readFileSync(workspacePath, 'utf8')
+
+  // The project directory is NOT moved by this command (the caller owns it), so
+  // keep it in place: `--from` must still exist for the plan to be meaningful.
+  const result = run([
+    'relocate-sessions',
+    '--from', env.from,
+    '--to', env.to,
+    '--sessions', movedId,
+    '--yes',
+    '--allow-running',
+    '--report', reportFile,
+    ...base,
+  ])
+  ok('exits 0', result.code === 0, result.json?.error ?? result.stderr.trim())
+  ok('report status ok', result.json?.status === 'ok', result.json?.error ?? '')
+  ok('a report file was written', fs.existsSync(reportFile))
+  ok('the report carries a plan snapshot for rollback', JSON.parse(fs.readFileSync(reportFile, 'utf8')).planData !== undefined)
+
+  const newKeyDir = path.join(env.sessionsRoot, env.newKey)
+  ok('the selected session moved to the new project key', fs.existsSync(path.join(newKeyDir, movedId)))
+  ok('the unselected session did NOT move', fs.existsSync(path.join(env.oldKeyDir, keptId)))
+  ok('the old project key directory survives (it still holds a session)', fs.existsSync(env.oldKeyDir))
+
+  // frame-level assertions on the moved session only
+  for (const name of fs.readdirSync(path.join(newKeyDir, movedId))) {
+    const after = framesOf(path.join(newKeyDir, movedId, name))
+    const original = before[`${movedId}/${name}`]
+    ok(`${name}: frame count preserved`, after.length === original.length, `${original.length} -> ${after.length}`)
+    ok(`${name}: every frame after frame 0 is byte-identical`, after.slice(1).every((f, i) => f.equals(original[i + 1])))
+    const text = zlib.zstdDecompressSync(after[0]).toString('utf8')
+    ok(`${name}: frame 0 is still exactly one header line`, text.length > 0 && text.indexOf('\n') === text.length - 1)
+    ok(`${name}: header cwd updated`, JSON.parse(text.slice(0, -1)).cwd === env.to)
+  }
+  // the kept session must be untouched, byte for byte
+  for (const name of fs.readdirSync(path.join(env.oldKeyDir, keptId))) {
+    const after = framesOf(path.join(env.oldKeyDir, keptId, name))
+    const original = before[`${keptId}/${name}`]
+    ok(`${keptId}/${name}: left byte-identical`, after.length === original.length && after.every((f, i) => f.equals(original[i])))
+  }
+
+  // the whole point of this command: workspace.json belongs to the live caller
+  ok('workspace.json is byte-identical (never touched)', fs.readFileSync(workspacePath, 'utf8') === workspaceBefore)
+  const report = JSON.parse(fs.readFileSync(reportFile, 'utf8'))
+  ok('the plan records that workspace.json patches were deferred', report.planData.metadata.skipWorkspaceJson === true)
+  ok('the deferred patches are reported, not silently dropped', Array.isArray(report.planData.metadata.workspaceJsonSkipped))
+
+  // projcache: moved session updated, kept session untouched
+  const cache = JSON.parse(fs.readFileSync(path.join(env.storagesRoot, 'session_projcache.json'), 'utf8'))
+  ok('projcache cwd updated for the moved session', cache.tables.sessions[movedId].identity.cwd === env.to, cache.tables.sessions[movedId].identity.cwd)
+  ok('projcache cwd untouched for the kept session', cache.tables.sessions[keptId].identity.cwd === env.from, cache.tables.sessions[keptId].identity.cwd)
+  const perMoved = JSON.parse(fs.readFileSync(path.join(env.storagesRoot, 'session_projcache', 'sessions', `${movedId}.json`), 'utf8'))
+  ok('per-session projcache updated for the moved session', perMoved.record.identity.cwd === env.to)
+
+  // ── rollback ──
+  const rollback = run(['relocate-sessions', '--rollback', '--report', reportFile, '--yes', ...base])
+  ok('rollback exits 0', rollback.code === 0, rollback.json?.error ?? JSON.stringify(rollback.json?.verification?.failures))
+  ok('rollback verification passed', rollback.json?.verification?.ok === true)
+  ok('rollback returned the session to the old key', fs.existsSync(path.join(env.oldKeyDir, movedId)))
+  for (const name of fs.readdirSync(path.join(env.oldKeyDir, movedId))) {
+    const restored = framesOf(path.join(env.oldKeyDir, movedId, name))
+    const original = before[`${movedId}/${name}`]
+    ok(`${movedId}/${name}: rollback restored the frames byte-for-byte`, restored.length === original.length && restored.every((f, i) => f.equals(original[i])))
+  }
+  ok('rollback left workspace.json alone too', fs.readFileSync(workspacePath, 'utf8') === workspaceBefore)
+  const verifyOriginal = run(['verify', '--plan', reportFile.replace('relocate-report.json', 'x.json'), '--expect', 'original', ...base])
+  void verifyOriginal
+}
+
+console.log('\n[Test F] relocate-sessions refuses bad input without mutating anything')
+{
+  const root = freshRoot('F')
+  const env = scenario(root, { sessions: [{ id: 'session-88888888-8888-8888-8888-888888888888', versions: [3] }] })
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const reportFile = path.join(root, 'r.json')
+  const missing = run([
+    'relocate-sessions', '--from', env.from, '--to', env.to,
+    '--sessions', 'session-does-not-exist', '--yes', '--allow-running', '--report', reportFile, ...base,
+  ])
+  ok('an unknown session id is refused', missing.code === 1)
+  ok('the refusal names the missing id', JSON.stringify(missing.json?.errors ?? []).includes('session-does-not-exist'))
+  ok('nothing was mutated', fs.existsSync(path.join(env.oldKeyDir, 'session-88888888-8888-8888-8888-888888888888')))
+  const noYes = run(['relocate-sessions', '--from', env.from, '--to', env.to, '--sessions', 'session-88888888-8888-8888-8888-888888888888', ...base])
+  ok('without --yes it refuses with the usage code', noYes.code === 2, `exit ${noYes.code}`)
+}
+
+console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)
+process.exitCode = failures === 0 ? 0 : 1

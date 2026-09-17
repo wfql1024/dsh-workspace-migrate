@@ -1,0 +1,15 @@
+# dsh-workspace-migrate bundle patch
+#
+# Installed with:
+#   dsh plugin --profile web add <path-or-npm-name>
+#
+# The CLI reconciles `dsh.profile.bundles` against installed packages and, seeing
+# this declaration, appends `dsh-workspace-migrate` to the bundle stack. The boot
+# then merges THIS patch (a single `insert` of the plugin row) exactly like a
+# manual cordis.patch.yml mount line. No profile file edits needed.
+#
+# One host row. It consumes the host `webServer` and `tools` services and
+# publishes none, so it needs no config and no isolate realm.
+- insert:
+    - id: workspace-migrate
+      name: 'dsh-workspace-migrate'

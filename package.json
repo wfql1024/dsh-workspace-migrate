@@ -1,0 +1,49 @@
+{
+  "name": "dsh-workspace-migrate",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness (DSH) plugin: move a workspace to a new path without stopping DSH — moves the project directory, relocates every session (including running ones and the conversation you are in) by rebinding its live writer, rewrites the session header cwd frame-safely, and updates the workspace registry. Ships a sidebar entry, a per-conversation entry, a Settings page, and the workspace_migrate tool.",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/dsh-workspace-migrate.mjs",
+    "lib/live-move.mjs",
+    "lib/zstd-frames.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "docs/DESIGN-live-move.md",
+    "test"
+  ],
+  "scripts": {
+    "test": "node --check index.js && node --check client.js && node --check lib/dsh-workspace-migrate.mjs && node --check lib/live-move.mjs && node test/hosttest.mjs && node test/clienttest.mjs && node test/livetest.mjs && node test/selftest.mjs",
+    "test:mutations": "node tools/run-mutations.mjs",
+    "test:all": "npm test && npm run test:mutations"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "workspace",
+    "session",
+    "migration"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  }
+}

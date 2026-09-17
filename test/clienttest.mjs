@@ -1,0 +1,353 @@
+/**
+ * Browser-half load test for dsh-workspace-migrate.
+ *
+ * The client bundle cannot be exercised in a real browser from here, and the
+ * page's React is not on disk (the module loader hands `require("react")` the
+ * page's own copy), so this harness supplies a minimal React + renderer and
+ * reproduces exactly what the vendored cordis Loader does: call
+ * `window.__ModuleLoader__.load({ id, factory })`, then invoke the factory with
+ * a `require` that resolves the host-provided externals.
+ *
+ * That catches: a wrong loader call shape, a bad `exports` contract, a throw at
+ * module or apply time, a wrong slot registration, a wrong createElement call,
+ * and any component that crashes on its first or second render.
+ */
+import { strict as assert } from 'node:assert'
+
+// ── minimal React ───────────────────────────────────────────────────────────
+let cells = []
+let cursor = 0
+let pendingEffects = []
+
+const react = {
+	createElement(type, props, ...children) {
+		return { $$element: true, type, props: props ?? {}, children: children.flat(Infinity) }
+	},
+	useState(initial) {
+		const slot = cursor++
+		if (cells.length <= slot) cells[slot] = typeof initial === 'function' ? initial() : initial
+		const setState = (next) => {
+			cells[slot] = typeof next === 'function' ? next(cells[slot]) : next
+		}
+		return [cells[slot], setState]
+	},
+	useEffect(effect) {
+		pendingEffects.push(effect)
+	},
+}
+
+function escapeHtml(value) {
+	return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** Render an element tree; function components are invoked, host elements emit tags. */
+function render(node) {
+	if (node === null || node === undefined || node === false || node === true) return ''
+	if (Array.isArray(node)) return node.map(render).join('')
+	if (typeof node === 'string' || typeof node === 'number') return escapeHtml(String(node))
+	if (node.$$element !== true) return ''
+	if (typeof node.type === 'function') {
+		const props = { ...node.props }
+		if (node.children.length > 0) props.children = node.children.length === 1 ? node.children[0] : node.children
+		return render(node.type(props))
+	}
+	const attrs = []
+	for (const [key, value] of Object.entries(node.props)) {
+		if (key === 'children' || typeof value === 'function' || value === undefined || value === null) continue
+		if (key === 'key' || key === 'spellCheck') continue
+		attrs.push(` ${key}="${escapeHtml(String(value))}"`)
+	}
+	const inner = node.children.map(render).join('')
+	return `<${node.type}${attrs.join('')}>${inner}</${node.type}>`
+}
+
+/** Render one component: render, run its effects, let promises settle, render again. */
+async function renderComponent(Component) {
+	cursor = 0
+	pendingEffects = []
+	const first = render(react.createElement(Component, {}))
+	const effects = pendingEffects
+	pendingEffects = []
+	for (const effect of effects) {
+		const cleanup = effect()
+		if (typeof cleanup === 'function') cleanup()
+	}
+	for (let i = 0; i < 8; i++) await Promise.resolve()
+	cursor = 0
+	pendingEffects = []
+	const second = render(react.createElement(Component, {}))
+	return { first, second }
+}
+
+/** Render one component with a clean state store — for components that read module state. */
+async function renderFresh(Component, props) {
+	cells = []
+	cursor = 0
+	pendingEffects = []
+	const first = render(react.createElement(Component, props ?? {}))
+	const effects = pendingEffects
+	pendingEffects = []
+	for (const effect of effects) {
+		const cleanup = effect()
+		if (typeof cleanup === 'function') cleanup()
+	}
+	for (let i = 0; i < 10; i++) await Promise.resolve()
+	cursor = 0
+	pendingEffects = []
+	const second = render(react.createElement(Component, props ?? {}))
+	return { first, second }
+}
+
+// ── page stubs ──────────────────────────────────────────────────────────────
+let capture = null
+const headChildren = []
+globalThis.window = {
+	__ModuleLoader__: {
+		load(definition) {
+			capture = definition
+		},
+	},
+}
+globalThis.document = {
+	querySelector() {
+		return null
+	},
+	createElement() {
+		return { dataset: {}, textContent: '' }
+	},
+	head: {
+		appendChild(node) {
+			headChildren.push(node)
+		},
+	},
+}
+const fetchCalls = []
+globalThis.fetch = async (url, options) => {
+	fetchCalls.push({ url, method: (options && options.method) || 'GET' })
+	if (url.endsWith('/session')) {
+		return {
+			status: 200,
+			json: async () => ({ ok: true, sessionId: 'session-from-props', cwd: 'D:/old/DemoProject', workspaceId: 'w1', workspaceTitle: 'DemoProject', source: 'projcache-session' }),
+		}
+	}
+	const body = {
+		ok: true,
+		dshHome: 'C:/Users/probe/.dsh',
+		engine: 'C:/pkg/lib/dsh-workspace-migrate.mjs',
+		workspaces: [
+			{ id: 'w1', title: 'DemoProject', path: 'D:/old/DemoProject', sessionIds: ['session-a', 'session-b'], pathState: 'directory', archived: [] },
+			{ id: 'w2', title: '缺失项目', path: 'Z:/gone/Missing', sessionIds: [], pathState: 'missing', archived: [] },
+		],
+		sessionsRoot: 'C:/Users/probe/.dsh/sessions',
+		projectKeys: ['--D-old-DemoProject--'],
+		runs: [
+			{ dir: 'C:/Users/probe/.dsh/migration-runs/run-1', planFile: 'C:/Users/probe/.dsh/migration-runs/run-1/plan.json', from: 'D:/old/DemoProject', to: 'E:/new/DemoProject', sessions: 2, report: null, applyCmd: 'C:/Users/probe/.dsh/migration-runs/run-1/1-apply-migration.cmd' },
+		],
+	}
+	return { status: 200, json: async () => body }
+}
+
+await import('../client.js')
+
+let checks = 0
+let failures = 0
+const ok = (label, condition, detail = '') => {
+	checks++
+	if (condition) console.log(`  pass  ${label}`)
+	else {
+		failures++
+		console.log(`  FAIL  ${label}${detail ? `  ${detail}` : ''}`)
+	}
+}
+
+console.log('\n[1] loader contract')
+ok('the bundle calls window.__ModuleLoader__.load', capture !== null)
+ok('the loader id matches the package name', capture && capture.id === 'dsh-workspace-migrate', capture && capture.id)
+ok('the definition carries a factory function', capture && typeof capture.factory === 'function')
+
+const resolved = []
+const fakeRequire = (specifier) => {
+	resolved.push(specifier)
+	if (specifier === 'react') return react
+	if (specifier === 'react/jsx-runtime') return { jsx: react.createElement, jsxs: react.createElement }
+	throw new Error('unexpected external: ' + specifier)
+}
+
+const exportsObject = capture.factory(fakeRequire)
+ok('only host-provided externals are required', resolved.every((name) => name === 'react' || name === 'react/jsx-runtime'), resolved.join(', '))
+ok('the factory returns an exports object', exportsObject !== null && typeof exportsObject === 'object')
+ok('exports.apply is a function', typeof exportsObject.apply === 'function')
+ok('exports.inject declares the slots service', JSON.stringify(exportsObject.inject) === JSON.stringify(['slots']), JSON.stringify(exportsObject.inject))
+
+console.log('\n[2] mounting through the real apply()')
+const registrations = []
+const slots = {
+	inject(key, callback) {
+		const disposer = callback()
+		return typeof disposer === 'function' ? disposer : () => {}
+	},
+	register(options, component) {
+		registrations.push({ options, component })
+		return () => {}
+	},
+}
+const effectLabels = []
+const ctx = {
+	get(name) {
+		return name === 'slots' ? slots : undefined
+	},
+	effect(fn, label) {
+		effectLabels.push(label)
+		const disposer = fn()
+		return typeof disposer === 'function' ? disposer : () => {}
+	},
+}
+
+let mountError = null
+try {
+	exportsObject.apply(ctx)
+} catch (error) {
+	mountError = error
+}
+ok('apply() does not throw', mountError === null, mountError && mountError.message)
+ok('all four entries registered', registrations.length === 4, `got ${registrations.length}`)
+ok('every registration is owned by a fiber effect', effectLabels.length === 4, `got ${effectLabels.length}`)
+
+const bySlot = {}
+for (const registration of registrations) bySlot[registration.options.name] = registration.options
+for (const expected of ['sidebar.footer.action', 'conversation.session.header.actions', 'settings.section', 'shell.overlay']) {
+	ok(`registered ${expected}`, bySlot[expected] !== undefined)
+}
+ok('every registration carries a non-empty string id', registrations.every((r) => typeof r.options.id === 'string' && r.options.id.length > 0))
+ok('every registration carries a numeric order', registrations.every((r) => typeof r.options.order === 'number'))
+ok('the settings section has a working label thunk', typeof bySlot['settings.section'].label === 'function' && bySlot['settings.section'].label() === '工作区迁移', bySlot['settings.section'].label && bySlot['settings.section'].label())
+ok('sidebar.workspaces is never registered (that single slot would shadow the shipped sidebar)', bySlot['sidebar.workspaces'] === undefined)
+
+console.log('\n[3] first and second render of every component')
+const rendered = {}
+for (const registration of registrations) {
+	const label = registration.options.name
+	let result = null
+	let renderError = null
+	try {
+		result = await renderComponent(registration.component)
+	} catch (error) {
+		renderError = error
+	}
+	ok(`${label} renders`, renderError === null, renderError && renderError.message)
+	if (result !== null) {
+		rendered[label] = result
+		if (label === 'shell.overlay') {
+			ok('shell.overlay stays empty while the dialog is closed', result.second === '', `${result.second.length} chars`)
+		} else {
+			ok(`${label} produced markup`, typeof result.second === 'string' && result.second.length > 0, `${result.second.length} chars`)
+			console.log(`        ${result.second.slice(0, 120).replace(/\s+/g, ' ')}${result.second.length > 120 ? ' …' : ''}`)
+		}
+	}
+}
+
+console.log('\n[4] dialog behaviour and data binding')
+ok('the dialog renders nothing while closed', rendered['shell.overlay'] && rendered['shell.overlay'].second === '', rendered['shell.overlay'] ? JSON.stringify(rendered['shell.overlay'].second.slice(0, 60)) : 'not rendered')
+
+const panelHtml = rendered['settings.section'] ? rendered['settings.section'].second : ''
+ok('the panel fetched /state on mount', fetchCalls.some((entry) => entry.url === '/api/dsh-workspace-migrate/state'), JSON.stringify(fetchCalls))
+ok('the panel lists the registered workspaces', panelHtml.includes('DemoProject') && panelHtml.includes('缺失项目'), 'workspace titles missing from markup')
+ok('the panel localizes the path state instead of printing raw enum values', panelHtml.includes('路径正常') && panelHtml.includes('路径不存在'), 'path-state labels missing')
+// Only the placeholders are checked: the panel legitimately shows the running machine's own
+// DSH home further down, which is not a hard-coded author path.
+const placeholders = [...panelHtml.matchAll(/placeholder="([^"]*)"/g)].map((match) => match[1])
+ok('every placeholder is path-free', placeholders.length > 0 && placeholders.every((value) => !/[A-Za-z]:[\\/]/.test(value)), JSON.stringify(placeholders))
+ok('the panel lists staged runs', panelHtml.includes('D:/old/DemoProject') && panelHtml.includes('尚未执行'))
+ok('the panel tells the user which runner to double-click after quitting DSH', panelHtml.includes('退出 DSH 后执行'), 'missing the apply-command hint')
+ok('the panel offers the stop-DSH plan mode', panelHtml.includes('停机计划'))
+ok('the panel defaults to the no-restart live mode', panelHtml.includes('不停机迁移（推荐）') && panelHtml.includes('预检'))
+ok('the live mode offers to move the project directory too', panelHtml.includes('帮我把项目目录一起搬过去'))
+ok('the panel states the shutdown requirement for the plan mode', panelHtml.includes('完全退出'))
+ok('the destructive live action is NOT offered before a preflight passes', !panelHtml.includes('执行不停机迁移'), 'the execute button must stay hidden until inspect says ok')
+ok('the panel shows the DSH home and engine path', panelHtml.includes('C:/Users/probe/.dsh') && panelHtml.includes('dsh-workspace-migrate.mjs'))
+ok('no crash placeholder leaked into the markup', !panelHtml.includes('undefined'))
+
+console.log('\n[5] entries')
+const sidebarHtml = rendered['sidebar.footer.action'] ? rendered['sidebar.footer.action'].second : ''
+const headerHtml = rendered['conversation.session.header.actions'] ? rendered['conversation.session.header.actions'].second : ''
+ok('the sidebar entry is a button', sidebarHtml.startsWith('<button'))
+ok('the sidebar entry is labelled', sidebarHtml.includes('迁移'))
+ok('the header entry is a button', headerHtml.startsWith('<button'))
+ok('the header entry is labelled', headerHtml.includes('迁移工作区'))
+
+console.log('\n[6] stylesheet injection')
+ok('a <style> tag was appended to document.head', headChildren.length === 1, `got ${headChildren.length}`)
+ok('the style tag is tagged with the plugin name', headChildren[0] && headChildren[0].dataset.plugin === 'dsh-workspace-migrate')
+ok('the stylesheet declares every class used in markup', ['dwsm-root', 'dwsm-btn', 'dwsm-card', 'dwsm-overlay', 'dwsm-dialog', 'dwsm-entry'].every((cls) => headChildren[0] && headChildren[0].textContent.includes('.' + cls)))
+
+console.log('\n[7] a failing seat must not cost the others')
+{
+	const partial = []
+	const explodingSlots = {
+		inject(key, callback) {
+			if (key === 'settings.section') throw new Error('simulated slot failure')
+			const disposer = callback()
+			return typeof disposer === 'function' ? disposer : () => {}
+		},
+		register(options) {
+			partial.push(options.name)
+			return () => {}
+		},
+	}
+	let threw = null
+	try {
+		exportsObject.apply({ get: () => explodingSlots, effect: (fn) => fn() })
+	} catch (error) {
+		threw = error
+	}
+	ok('apply() survives a failing seat', threw === null, threw && threw.message)
+	ok('the other three seats still registered', partial.length === 3, partial.join(', '))
+	ok('the failing seat is the only one missing', !partial.includes('settings.section'))
+}
+
+console.log('\n[8] the conversation-header entry preselects its own session workspace')
+{
+	const headerComponent = registrations.find((r) => r.options.name === 'conversation.session.header.actions').component
+	const overlayComponent = registrations.find((r) => r.options.name === 'shell.overlay').component
+
+	const withoutSession = headerComponent({})
+	ok('the header entry renders a button', withoutSession.type === 'button')
+	ok('the header entry exposes a click handler', typeof withoutSession.props.onClick === 'function')
+
+	// The seat is session-scoped, so the real Owner passes sessionId.
+	const withSession = headerComponent({ sessionId: 'session-from-props' })
+	withSession.props.onClick()
+
+	fetchCalls.length = 0
+	const dialog = await renderFresh(overlayComponent)
+	ok('clicking the entry opens the dialog', dialog.second.length > 0, `${dialog.second.length} chars`)
+	ok('the dialog resolved the session id against the host', fetchCalls.some((entry) => entry.url === '/api/dsh-workspace-migrate/session' && entry.method === 'POST'), JSON.stringify(fetchCalls))
+	ok('the dialog prefilled「从」with the session workspace', dialog.second.includes('value="D:/old/DemoProject"'), 'prefill missing')
+
+	// The picker is a controlled <select>, so its own tag must carry the selected workspace
+	// rather than a constant empty value. Asserting on the whole markup would pass spuriously,
+	// because the「从」text input carries the same path string.
+	const selectTag = /<select[^>]*>/.exec(dialog.second)
+	ok(
+		'the workspace picker reflects the preselected workspace',
+		selectTag !== null && selectTag[0].includes('value="D:/old/DemoProject"'),
+		selectTag === null ? 'no <select> rendered' : selectTag[0],
+	)
+	const settingsSelectTag = /<select[^>]*>/.exec(panelHtml)
+	ok(
+		'with nothing selected the picker falls back to the placeholder',
+		settingsSelectTag !== null && settingsSelectTag[0].includes('value=""'),
+		settingsSelectTag === null ? 'no <select> rendered' : settingsSelectTag[0],
+	)
+
+	// A non-session entry (the sidebar seat) must NOT preselect anything.
+	const sidebarComponent = registrations.find((r) => r.options.name === 'sidebar.footer.action').component
+	sidebarComponent({}).props.onClick()
+	fetchCalls.length = 0
+	const plainDialog = await renderFresh(overlayComponent)
+	ok('the sidebar entry opens the dialog too', plainDialog.second.length > 0)
+	ok('the sidebar entry does NOT call /session', !fetchCalls.some((entry) => entry.url === '/api/dsh-workspace-migrate/session'), JSON.stringify(fetchCalls))
+}
+
+console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)
+process.exitCode = failures === 0 ? 0 : 1
