@@ -343,8 +343,7 @@ console.log('\n[Test C] duplicate session id refuses safely')
   ok('nothing was mutated', fs.existsSync(path.join(env.oldKeyDir, 'session-44444444-4444-4444-4444-444444444444')) && fs.existsSync(env.from))
 }
 
-// ── Test D: a live session.lock blocks apply ───────────────────────────────
-console.log('\n[Test D] a live session.lock blocks apply')
+// ── Test D: a live session.lock blocks apply ───────────────────────────────console.log('\n[Test D] a live session.lock blocks apply')
 {
   const root = freshRoot('D')
   const env = scenario(root, { sessions: [{ id: 'session-55555555-5555-5555-5555-555555555555', versions: [3] }], locks: true })
@@ -459,6 +458,70 @@ console.log('\n[Test F] relocate-sessions refuses bad input without mutating any
   ok('nothing was mutated', fs.existsSync(path.join(env.oldKeyDir, 'session-88888888-8888-8888-8888-888888888888')))
   const noYes = run(['relocate-sessions', '--from', env.from, '--to', env.to, '--sessions', 'session-88888888-8888-8888-8888-888888888888', ...base])
   ok('without --yes it refuses with the usage code', noYes.code === 2, `exit ${noYes.code}`)
+}
+
+// ── Test G: pre-existing damage elsewhere must not block this migration ────
+//
+// Found on a real host: one session id sat under two project keys, and an interrupted
+// relocation of an older build had left an EMPTY session directory under a third key. The
+// global uniqueness check called that a violation and refused an unrelated migration —
+// "post-migration verification failed: no session id appears under two project keys".
+console.log('\n[Test G] unrelated pre-existing damage does not block a migration')
+{
+  const root = freshRoot('G')
+  const target = 'session-99999999-9999-9999-9999-999999999999'
+  const env = scenario(root, { sessions: [{ id: target, versions: [3] }] })
+  const elsewhere = path.join(root, 'projects', 'elsewhere')
+
+  // An empty orphan: a session directory with no generation log at all.
+  const orphanId = 'session-7b63fd23-3b90-4b3f-b854-bd121785e8a9'
+  const orphanDir = path.join(env.sessionsRoot, '--stale-project-key--', orphanId)
+  fs.mkdirSync(orphanDir, { recursive: true })
+
+  // A real duplicate between two project keys this migration does not touch.
+  const twinId = 'session-0abcdef0-0000-0000-0000-000000000000'
+  const twinDirs = ['--unrelated-one--', '--unrelated-two--'].map((key) => path.join(env.sessionsRoot, key, twinId))
+  for (const dir of twinDirs) {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'session.v3.jsonl.zstd'), buildLog(twinId, elsewhere, { version: 3, events: [[]] }))
+  }
+
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const plan = run(['plan', '--from', env.from, '--to', env.to, ...base])
+  ok('plan is not blocked by unrelated damage', plan.json?.ok === true, JSON.stringify(plan.json?.errors))
+  const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('apply exits 0', apply.code === 0, apply.json?.error ?? apply.stderr.trim())
+
+  const notes = (apply.json?.verification?.notes ?? []).join(' | ')
+  ok('the unrelated duplicate is reported, not enforced', /pre-existing duplicate session id/.test(notes), notes)
+  ok('the empty orphan is reported, not enforced', /hold no session log/.test(notes), notes)
+  ok('the empty orphan was registered as nothing', apply.json?.verification?.ok === true, JSON.stringify(apply.json?.verification?.failures))
+  ok('the empty orphan was left alone', fs.existsSync(orphanDir))
+  ok('the unrelated twin was left alone', twinDirs.every((dir) => fs.existsSync(path.join(dir, 'session.v3.jsonl.zstd'))))
+  ok('the real migration still happened', fs.existsSync(path.join(env.sessionsRoot, env.newKey, target)))
+}
+
+// ── Test H: a duplicate this run IS responsible for still fails ────────────
+//
+// The scoping above must not excuse a duplicate the migration itself created, or one that
+// involves the session being moved.
+console.log('\n[Test H] a duplicate this migration is responsible for still fails')
+{
+  const root = freshRoot('H')
+  const env = scenario(root, { sessions: [{ id: 'session-aaaaaaaa-1111-1111-1111-111111111111', versions: [3] }] })
+  // The migrated id also exists, with content, under a third key.
+  const third = path.join(env.sessionsRoot, '--third-key--', 'session-aaaaaaaa-1111-1111-1111-111111111111')
+  fs.mkdirSync(third, { recursive: true })
+  fs.writeFileSync(
+    path.join(third, 'session.v3.jsonl.zstd'),
+    buildLog('session-aaaaaaaa-1111-1111-1111-111111111111', path.join(root, 'projects', 'elsewhere'), { version: 3, events: [[]] }),
+  )
+
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const plan = run(['plan', '--from', env.from, '--to', env.to, ...base])
+  const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('apply fails', apply.code === 1, `exit ${apply.code}`)
+  ok('the failure names the two project keys', JSON.stringify(apply.json?.error ?? '').includes('two project keys'), apply.json?.error)
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

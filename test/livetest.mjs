@@ -14,7 +14,7 @@ import crypto from 'node:crypto'
 import { strict as assert } from 'node:assert'
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\//, ''))
-const { liveMoveSessions, inspectLiveMove, projectKeyOf, pathEquals, entityPath, entitySessionIds } = await import(
+const { liveMoveSessions, inspectLiveMove, moveProjectDirectory, projectKeyOf, pathEquals, entityPath, entitySessionIds } = await import(
   '../lib/live-move.mjs'
 )
 
@@ -190,7 +190,7 @@ function fakeEntity(id, titleValue, entityPathValue, sessionIds, log, host) {
 }
 
 /** A fake workspaceRegistry over a real synthetic home. */
-function fakeRegistry(home, { log = [], failAttach = false, indexMaps = true, seedHeaderCache = true } = {}) {
+function fakeRegistry(home, { log = [], failAttach = false, onAttachFail = undefined, indexMaps = true, seedHeaderCache = true } = {}) {
   const headers = new Map()
   const sessionPaths = new Map()
   const invalid = new Set()
@@ -219,6 +219,9 @@ function fakeRegistry(home, { log = [], failAttach = false, indexMaps = true, se
       if (failAttach) {
         entity.attachSession = async (sessionId) => {
           log.push(`attach-fail:${sessionId}`)
+          // A hook so a test can put the world into whatever state the failure should be
+          // unwound from (for example: robocopy left the original path as an empty husk).
+          if (typeof onAttachFail === 'function') onAttachFail()
           throw new Error('simulated attachSession rejection')
         }
       }
@@ -677,6 +680,66 @@ console.log('\n[14] a failed memory layer puts a RUNNING session back where it w
     return written.ok === false && written.stage === 'memory-layer'
   })())
   fs.rmSync(home.root, { recursive: true, force: true })
+}
+
+// ── the project-directory rollback survives an empty husk at the original path ──
+//
+// Found on a real host: the rollback reported
+//   project-directory: the destination already exists: E:\...\main
+// because the original path still existed (empty) by the time the undo ran. An empty leftover
+// is not a reason to leave a project half-moved.
+console.log('\n[15] the project directory rolls back over an empty husk')
+{
+  const home = makeHome('husk', ['session-1'], { destinationExists: false })
+  let huskCreated = false
+  const registry = fakeRegistry(home, {
+    failAttach: true,
+    // Recreate the original path, empty, exactly as a partially-completed move leaves it.
+    onAttachFail: () => {
+      fs.mkdirSync(home.from, { recursive: true })
+      huskCreated = true
+    },
+  })
+
+  const result = await withHome(home, () => liveMoveSessions(fakeServices({ registry }), { fromPath: home.from, toPath: home.to, moveProject: true }))
+
+  ok('the failure happened after the husk was created', huskCreated === true)
+  ok('fails', result.ok === false, JSON.stringify(result.stage))
+  ok('the project content came back', fs.existsSync(path.join(home.from, 'readme.txt')))
+  ok('the destination is gone', !fs.existsSync(home.to))
+  ok('the rollback reported no undo error', Array.isArray(result.rollback?.undoErrors) && result.rollback.undoErrors.length === 0, JSON.stringify(result.rollback))
+  ok('the session is back under the old projectKey', fs.existsSync(path.join(home.oldKeyDir, 'session-1')))
+  fs.rmSync(home.root, { recursive: true, force: true })
+}
+
+// ── moving a real directory leaves no husk, and only takes over an EMPTY one ──
+console.log('\n[16] a real project-directory move leaves nothing behind at the source')
+{
+  const root = path.join(os.tmpdir(), `dwsm-move-${crypto.randomUUID().slice(0, 8)}`)
+  const from = path.join(root, 'old')
+  const to = path.join(root, 'new')
+  fs.mkdirSync(path.join(from, 'src'), { recursive: true })
+  fs.writeFileSync(path.join(from, 'marker.txt'), 'x\n')
+  fs.writeFileSync(path.join(from, 'src', 'nested.txt'), 'y\n')
+
+  const moved = moveProjectDirectory(from, to)
+  ok('the move reports success', moved.ok === true, JSON.stringify(moved))
+  ok('the content is at the destination', fs.existsSync(path.join(to, 'marker.txt')) && fs.existsSync(path.join(to, 'src', 'nested.txt')))
+  ok('the original path is gone, so no rollback can hit a husk', !fs.existsSync(from))
+
+  // Even if something recreates an empty original path, the undo must be able to proceed.
+  fs.mkdirSync(from, { recursive: true })
+  const back = moveProjectDirectory(to, from, { replaceEmptyDestination: true })
+  ok('the rollback takes over an empty destination', back.ok === true, JSON.stringify(back))
+  ok('the content came back', fs.existsSync(path.join(from, 'marker.txt')))
+
+  // A destination holding anything at all is still refused, flag or no flag.
+  fs.mkdirSync(to, { recursive: true })
+  fs.writeFileSync(path.join(to, 'occupied.txt'), 'z\n')
+  const refused = moveProjectDirectory(from, to, { replaceEmptyDestination: true })
+  ok('a non-empty destination is still refused', refused.ok === false && /already exists/.test(String(refused.error)), JSON.stringify(refused))
+  ok('the refused move changed nothing', fs.existsSync(path.join(from, 'marker.txt')) && fs.existsSync(path.join(to, 'occupied.txt')))
+  fs.rmSync(root, { recursive: true, force: true })
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

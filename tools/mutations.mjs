@@ -66,7 +66,7 @@ export const MUTATIONS = [
     file: 'lib/dsh-workspace-migrate.mjs',
     suite: 'test/selftest.mjs',
     breaks: 'an empty orphan session directory counts as a session, so it blocks an unrelated move',
-    from: '        if (empty) {\n          emptyOrphans += 1\n          continue\n        }',
+    from: '        if (empty) {\n          emptyOrphans.push(dir)\n          continue\n        }',
     to: '        void empty /* MUTATION: empty orphans counted as sessions */',
   },
   {
