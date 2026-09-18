@@ -98,6 +98,54 @@ async function renderFresh(Component, props) {
 	return { first, second }
 }
 
+/**
+ * Hook slots of `Panel`, in call order — the state store is a plain array, so a test can seed
+ * the panel as if a preflight or a migration had just happened. Kept next to the assertion that
+ * uses it: if `Panel` gains a hook, this list has to move with it (the test then fails loudly,
+ * because the wrong slot shifts every seeded value).
+ */
+let PanelComponent = null
+const PANEL_HOOKS = [
+	'dialog', // useDialog()
+	'state',
+	'error',
+	'busy',
+	'from',
+	'to',
+	'plan',
+	'verify',
+	'prefilled',
+	'mode',
+	'moveProject',
+	'liveInspect',
+	'liveResult',
+]
+
+/** Render `Panel` with selected hook slots pre-set. */
+async function renderPanelWith(overrides) {
+	// Slot 0 is the dialog state the panel reads (`useDialog()`), the rest mirror Panel's own
+	// `useState` defaults. `open: true` keeps every section rendered.
+	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, 'live', false, null, null]
+	for (const [name, value] of Object.entries(overrides)) {
+		const slot = PANEL_HOOKS.indexOf(name)
+		if (slot === -1) throw new Error(`unknown panel hook: ${name}`)
+		cells[slot] = value
+	}
+	cursor = 0
+	pendingEffects = []
+	render(react.createElement(PanelComponent, {}))
+	const effects = pendingEffects
+	pendingEffects = []
+	for (const effect of effects) {
+		const cleanup = effect()
+		if (typeof cleanup === 'function') cleanup()
+	}
+	for (let i = 0; i < 10; i++) await Promise.resolve()
+	cursor = 0
+	pendingEffects = []
+	return render(react.createElement(PanelComponent, {}))
+}
+
 // ── page stubs ──────────────────────────────────────────────────────────────
 let capture = null
 const headChildren = []
@@ -215,6 +263,8 @@ ok('every registration is owned by a fiber effect', effectLabels.length === 4, `
 
 const bySlot = {}
 for (const registration of registrations) bySlot[registration.options.name] = registration.options
+// The component sits on the registration itself; `options` is the slot registration contract.
+PanelComponent = registrations.find((registration) => registration.options.name === 'settings.section').component
 for (const expected of ['sidebar.footer.action', 'conversation.session.header.actions', 'settings.section', 'shell.overlay']) {
 	ok(`registered ${expected}`, bySlot[expected] !== undefined)
 }
@@ -347,6 +397,70 @@ console.log('\n[8] the conversation-header entry preselects its own session work
 	const plainDialog = await renderFresh(overlayComponent)
 	ok('the sidebar entry opens the dialog too', plainDialog.second.length > 0)
 	ok('the sidebar entry does NOT call /session', !fetchCalls.some((entry) => entry.url === '/api/dsh-workspace-migrate/session'), JSON.stringify(fetchCalls))
+}
+
+console.log('\n[7] signal markers in the result dialog')
+{
+	// The user reads this dialog to decide whether something went wrong. Every line has to say
+	// which it is: `[√]` done, `[!]` degraded but handled, `[×]` failed, `[i]` context.
+	const success = await renderPanelWith({
+		from: 'D:/old/DemoProject',
+		to: 'E:/new/DemoProject',
+		liveInspect: { ok: true, blockers: [], notes: [], project: { willMove: true, sourceExists: true, destinationExists: false }, sessionIds: ['session-a'] },
+		liveResult: {
+			ok: true,
+			stage: 'done',
+			from: 'D:/old/DemoProject',
+			to: 'E:/new/DemoProject',
+			movedCount: 2,
+			workspaceCreated: true,
+			workspaceTitle: 'DemoProject',
+			projectMoved: true,
+			sessionIds: ['session-a', 'session-b'],
+			notes: [
+				'[√] 1 session(s) are running and will be relocated in process, without interrupting them',
+				'[√] project directory moved (robocopy /E /MOVE): D:/old/DemoProject -> E:/new/DemoProject',
+				'[!] the projection cache could not be checkpointed for session-a; it self-heals on the next write',
+				'[i] 1 session(s) with this cwd are stored but not indexed on the workspace; they are included',
+				'legacy unmarked note from an older host',
+			],
+		},
+	})
+	ok('the success header is marked done', success.includes('[√] 迁移完成（全程未关闭 DSH）'), success.slice(0, 200))
+	ok('a positive note keeps its own marker', success.includes('[√] 1 session(s) are running'), 'missing the running-session note')
+	ok('a degraded note is a warning, not a failure', success.includes('[!] the projection cache could not be checkpointed'))
+	ok('an informational note is marked as context', success.includes('[i] 1 session(s) with this cwd are stored'))
+	ok('a marked note is not double-labelled with「提示」', !success.includes('提示: [√]') && !success.includes('提示: [!]'), 'the host marker and the fallback label both rendered')
+	ok('an unmarked legacy note still gets a label', success.includes('提示: legacy unmarked note'))
+
+	const failure = await renderPanelWith({
+		from: 'D:/old/DemoProject',
+		to: 'E:/new/DemoProject',
+		liveResult: {
+			ok: false,
+			stage: 'memory-layer',
+			blockers: ['the workspace registry refused the re-point: duplicate JSONL session id "session-a" appears in multiple project directories'],
+			rollback: { filesRestored: true, undoErrors: [], memoryErrors: [] },
+			notes: ['[!] the registry exposes no header index to invalidate; validation will read from disk'],
+		},
+	})
+	ok('the failure header is marked failed', failure.includes('[×] 迁移失败（阶段：memory-layer）'), failure.slice(0, 200))
+	ok('a blocker is marked failed', failure.includes('[×] the workspace registry refused the re-point'))
+	ok('a successful rollback reads as a positive', failure.includes('[√] 文件已还原: 是'))
+	ok('a degraded note stays a warning', failure.includes('[!] the registry exposes no header index'))
+
+	const blocked = await renderPanelWith({
+		liveInspect: {
+			ok: false,
+			blockers: ['the destination already exists: E:/new/DemoProject — remove it, or leave the project where it is and move it yourself'],
+			notes: [],
+			project: { willMove: false, sourceExists: true, destinationExists: true },
+			sessionIds: [],
+		},
+	})
+	ok('a refused preflight is marked failed', blocked.includes('[×] 预检结论：会被拒绝'), blocked.slice(0, 200))
+	ok('its blockers are marked failed', blocked.includes('[×] the destination already exists'))
+	ok('the execute button stays hidden while the preflight is refused', !blocked.includes('执行不停机迁移'))
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

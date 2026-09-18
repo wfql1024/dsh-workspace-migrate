@@ -143,6 +143,18 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * Render one host line as-is when it already carries a signal marker.
+		 *
+		 * The host prefixes every note with `[√]` (done), `[!]` (degraded but handled),
+		 * `[×]` (failed) or `[i]` (context) so a note is never mistaken for an error. Unmarked
+		 * text — an older host, or a line this dialog builds itself — gets the neutral label.
+		 */
+		function marked(value) {
+			const line = text(value);
+			return /^\s*\[[√×!i]\]/.test(line) ? line : "提示: " + line;
+		}
+
+		/**
 		 * Case-insensitive path equality, for display only: the workspace picker has to show the
 		 * workspace currently in「从」as its selected option, and Windows paths differ in case.
 		 * The host stays the authority on path identity.
@@ -501,9 +513,9 @@ window.__ModuleLoader__.load({
 			// live verdict / result
 			if (liveInspect !== null) {
 				const lines = [];
-				lines.push(liveInspect.ok === true ? "预检结论：可以迁移（不需要关 DSH）" : "预检结论：会被拒绝");
-				for (const blocker of liveInspect.blockers || []) lines.push("阻止: " + text(blocker));
-				for (const note of liveInspect.notes || []) lines.push("提示: " + text(note));
+				lines.push(liveInspect.ok === true ? "[√] 预检结论：可以迁移（不需要关 DSH）" : "[×] 预检结论：会被拒绝");
+				for (const blocker of liveInspect.blockers || []) lines.push("[×] " + text(blocker));
+				for (const note of liveInspect.notes || []) lines.push(marked(note));
 				if (liveInspect.project) {
 					lines.push(
 						"项目目录: " +
@@ -519,22 +531,22 @@ window.__ModuleLoader__.load({
 			if (liveResult !== null) {
 				const lines = [];
 				if (liveResult.ok === true) {
-					lines.push("迁移完成（全程未关闭 DSH）");
+					lines.push("[√] 迁移完成（全程未关闭 DSH）");
 					lines.push("会话: " + text(liveResult.movedCount) + " 个");
 					lines.push(text(liveResult.from) + "  ->  " + text(liveResult.to));
 					lines.push("工作区: " + (liveResult.workspaceCreated ? "已新建" : "复用已有的") + " " + text(liveResult.workspaceTitle));
 					lines.push("项目目录: " + (liveResult.projectMoved ? "已一起搬迁" : "保持原位"));
 					for (const id of liveResult.sessionIds || []) lines.push("   - " + text(id));
 				} else {
-					lines.push("迁移失败（阶段：" + text(liveResult.stage) + "）");
-					for (const blocker of liveResult.blockers || []) lines.push("阻止: " + text(blocker));
+					lines.push("[×] 迁移失败（阶段：" + text(liveResult.stage) + "）");
+					for (const blocker of liveResult.blockers || []) lines.push("[×] " + text(blocker));
 					if (liveResult.rollback) {
-						lines.push("文件已还原: " + (liveResult.rollback.filesRestored === true ? "是" : "否"));
-						for (const err of liveResult.rollback.memoryErrors || []) lines.push("内存回滚错误: " + text(err));
-						for (const err of liveResult.rollback.undoErrors || []) lines.push("撤销错误: " + text(err));
+						lines.push((liveResult.rollback.filesRestored === true ? "[√]" : "[×]") + " 文件已还原: " + (liveResult.rollback.filesRestored === true ? "是" : "否"));
+						for (const err of liveResult.rollback.memoryErrors || []) lines.push("[×] 内存回滚错误: " + text(err));
+						for (const err of liveResult.rollback.undoErrors || []) lines.push("[×] 撤销错误: " + text(err));
 					}
 				}
-				for (const note of liveResult.notes || []) lines.push("提示: " + text(note));
+				for (const note of liveResult.notes || []) lines.push(marked(note));
 				children.push(
 					react.createElement(
 						"div",
@@ -547,15 +559,15 @@ window.__ModuleLoader__.load({
 			// plan result
 			if (plan !== null) {
 				const lines = [];
-				lines.push(plan.ok === true ? "结论：可以执行（READY）" : "结论：被阻止（BLOCKED）");
+				lines.push(plan.ok === true ? "[√] 结论：可以执行（READY）" : "[×] 结论：被阻止（BLOCKED）");
 				lines.push("projectKey: " + text(plan.oldKey));
 				lines.push("         -> " + text(plan.newKey));
 				lines.push("待迁移会话: " + text(plan.sessions ? plan.sessions.toMigrate.length : "?") + " 个（跳过 " + text(plan.sessions ? plan.sessions.foreign.length : "?") + "，已在目标 " + text(plan.sessions ? plan.sessions.alreadyAtNew.length : "?") + "）");
 				lines.push("元数据补丁: " + text(plan.metadata ? plan.metadata.patches.length : "?") + " 处");
 				lines.push("项目目录动作: " + text(plan.project ? plan.project.action : "?"));
 				lines.push("DSH 是否在运行: " + (plan.running && plan.running.dshProcesses && plan.running.dshProcesses.length > 0 ? "是 —— 执行前必须先完全退出 DSH" : "否"));
-				for (const warning of plan.warnings || []) lines.push("警告: " + text(warning));
-				for (const err of plan.errors || []) lines.push("错误: " + text(err));
+				for (const warning of plan.warnings || []) lines.push("[!] " + text(warning));
+				for (const err of plan.errors || []) lines.push("[×] " + text(err));
 
 				const planChildren = [react.createElement(CodeLine, { key: "kv" }, lines.join("\n"))];
 
@@ -596,9 +608,9 @@ window.__ModuleLoader__.load({
 
 			if (verify !== null) {
 				const lines = [];
-				for (const check of verify.checks || []) lines.push((check.ok ? "PASS  " : "FAIL  ") + text(check.name) + "  " + text(check.detail));
-				for (const note of verify.notes || []) lines.push("note  " + text(note));
-				lines.push("结论: " + (verify.ok ? "ALL CHECKS PASS" : text((verify.failures || []).length) + " 项失败"));
+				for (const check of verify.checks || []) lines.push((check.ok ? "[√]" : "[×]") + " " + text(check.name) + "  " + text(check.detail));
+				for (const note of verify.notes || []) lines.push(marked(note));
+				lines.push((verify.ok ? "[√]" : "[×]") + " 结论: " + (verify.ok ? "ALL CHECKS PASS" : text((verify.failures || []).length) + " 项失败"));
 				children.push(
 					react.createElement(
 						"div",

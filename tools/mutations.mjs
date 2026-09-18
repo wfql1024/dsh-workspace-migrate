@@ -38,6 +38,14 @@ export const MUTATIONS = [
     to: '  return Object.freeze(Object.assign({}, source, { cwd })) /* MUTATION: realm-losing copy */',
   },
   {
+    name: 'note-markers-dropped',
+    file: 'lib/live-move.mjs',
+    suite: 'test/livetest.mjs',
+    breaks: 'result notes lose their signal marker, so a handled warning reads like a failure',
+    from: '  const notes = [...pre.notes]\n  const noteOk = (value) => notes.push(`${MARK.ok} ${value}`)',
+    to: '  const notes = [...pre.notes]\n  const noteOk = (value) => notes.push(String(value)) /* MUTATION: marker dropped */',
+  },
+  {
     name: 'companions-left-behind',
     file: 'lib/live-move.mjs',
     suite: 'test/livetest.mjs',

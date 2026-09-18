@@ -618,6 +618,11 @@ console.log('\n[13] a running session is relocated in process and its writer ret
   const result = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to }))
 
   ok('succeeds without closing anything', result.ok === true, JSON.stringify(result.blockers ?? result))
+  // Every user-visible line says what it is: `[√]` done, `[!]` degraded but handled, `[×]`
+  // failed, `[i]` context. Without that, a handled warning reads like a failure.
+  ok('every note carries a signal marker', Array.isArray(result.notes) && result.notes.every((note) => /^\[[√×!i]\] /.test(note)), JSON.stringify(result.notes))
+  ok('the running-session note is marked done', result.notes.some((note) => /^\[√\] /.test(note) && /are running and will be relocated/.test(note)), JSON.stringify(result.notes))
+  ok('a degraded note is marked as a warning, not a failure', result.notes.some((note) => /^\[!\] /.test(note) && /only the registry index was searched/.test(note)), JSON.stringify(result.notes))
   ok('it reports one live relocation', Array.isArray(result.liveRelocated) && result.liveRelocated.length === 1, JSON.stringify(result.liveRelocated))
   ok('the spawned engine was not used at all', result.engineReport === null, JSON.stringify(result.engineReport))
   ok('it notes that the engine was skipped', result.notes.some((note) => /every session is running/.test(note)), JSON.stringify(result.notes))

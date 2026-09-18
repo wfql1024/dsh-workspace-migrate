@@ -1,0 +1,4 @@
+# Keep the repo LF everywhere: these are Node/JS sources and shell-ish cmd files.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

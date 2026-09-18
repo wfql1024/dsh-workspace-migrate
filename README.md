@@ -2,6 +2,9 @@
 
 DSH（DeepSeek Harness）插件：把一个工作区**整体搬到新路径**，历史会话跟过去，**包括你正在对话的那一条**，全程不用退出 DSH。
 
+> Move a DSH workspace — its project directory, its registration and every session, including the
+> conversation you are chatting in — to a new path without stopping the harness.
+
 一次完整的迁移做四件事，缺一不可：
 
 1. 搬项目本体目录（`D:\...` → `E:\...`）
