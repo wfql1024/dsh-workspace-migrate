@@ -120,13 +120,14 @@ const PANEL_HOOKS = [
 	'liveInspect',
 	'liveResult',
 	'expanded',
+	'openNotice',
 ]
 
 /** Render `Panel` with selected hook slots pre-set. */
 async function renderPanelWith(overrides) {
 	// Slot 0 is the dialog state the panel reads (`useDialog()`), the rest mirror Panel's own
 	// `useState` defaults. `open: true` keeps every section rendered.
-	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, false, false, null, null, {}]
+	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, false, false, null, null, {}, null]
 	for (const [name, value] of Object.entries(overrides)) {
 		const slot = PANEL_HOOKS.indexOf(name)
 		if (slot === -1) throw new Error(`unknown panel hook: ${name}`)
@@ -505,6 +506,8 @@ console.log('\n[7] signal markers in the result dialog')
 	ok('the plan result is one labelled row', plan.includes('dwsm-disc-title">Plan<'), plan.slice(0, 300))
 	ok('the plan row carries its status chip', plan.includes('dwsm-chip-ok">可执行<'))
 	ok('the plan row offers to open the staged directory without expanding', plan.includes('打开目录'), 'the open-directory action belongs on the summary row')
+	ok('rollback is presented as the way out, not as step 3 of the happy path', plan.includes('若遇到错误，可以回滚：') && plan.indexOf('若遇到错误，可以回滚：') > plan.indexOf('2-verify'), 'rollback needs its own subheading after steps 1 and 2')
+	ok('no verify button is offered inside the plan', !plan.includes('立即只读校验'), 'verify is the second script, run while DSH is down')
 	// The action hugs the status chip; only the spacer follows it.
 	const planHead = plan.slice(plan.indexOf('dwsm-disc-title">Plan<'), plan.indexOf('dwsm-disc-body'))
 	ok(
@@ -513,6 +516,24 @@ console.log('\n[7] signal markers in the result dialog')
 		planHead,
 	)
 	ok('the plan result stays collapsed to one line', plan.includes('dwsm-disc-title">Plan<') && plan.includes('hidden="true"'), 'a plan must not unfold by itself')
+
+	// The staged rows are bare paths now, so the steps live behind the「i」on the row header.
+	const hint = await renderPanelWith({ expanded: { hint: true } })
+	ok('the staged row carries an「i」help button', /dwsm-i[^>]*>i</.test(hint), hint.slice(hint.indexOf('暂存的手动迁移'), hint.indexOf('暂存的手动迁移') + 300))
+	ok('the help explains what to do with a staged run', hint.includes('先点「打开目录」') && hint.includes('1-apply-migration.cmd') && hint.includes('2-verify.cmd') && hint.includes('3-rollback.cmd'), 'the steps must be spelled out')
+	ok('the help is closed until asked for', (await renderPanelWith({})).includes('用法：') === false, 'the hint must not be shown by default')
+
+	// Launching a file manager changes nothing inside the page, so the row has to say what
+	// happened at the click site — otherwise a working button looks dead.
+	const notice = await renderPanelWith({ openNotice: { row: 'runs', ok: true, text: '已请求系统打开（若窗口没弹出，请看运行 DSH 的终端）：C:/Users/probe/.dsh/migration-runs/run-1' } })
+	ok('the open result is reported next to the row that asked', notice.includes('已请求系统打开') && notice.includes('若窗口没弹出'), 'a successful launch needs visible feedback')
+	// A notice is row-scoped, so the failing case needs the row it belongs to.
+	const planNotice = await renderPanelWith({
+		openNotice: { row: 'plan', ok: false, text: '宿主半体还是旧版本' },
+		plan: { ok: true, oldKey: '--a--', newKey: '--b--', sessions: { toMigrate: [{}], foreign: [], alreadyAtNew: [] }, metadata: { patches: [] }, project: { action: 'keep' }, running: { dshProcesses: [] }, warnings: [], errors: [], stage: { dir: 'C:/Users/probe/.dsh/migration-runs/run-1', planFile: 'p', applyCmd: 'a', verifyCmd: 'v', rollbackCmd: 'r' } },
+	})
+	ok('a failed open is reported the same way', planNotice.includes('[×] 宿主半体还是旧版本'), 'a stale host must be named at the click site')
+	ok('a notice only appears on its own row', !notice.includes('宿主半体还是旧版本'), 'notices must not leak across rows')
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

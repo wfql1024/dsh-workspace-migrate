@@ -77,6 +77,10 @@ window.__ModuleLoader__.load({
 			".dwsm-chip-bad{color:var(--dsw-alias-state-error-primary,#e5534b);border-color:currentColor;}",
 			".dwsm-chip-warn{color:var(--dsw-alias-state-warn-primary,#bf8700);border-color:currentColor;}",
 			".dwsm-chip-info{color:var(--dsw-alias-label-secondary,inherit);border-color:var(--dsw-alias-border-l2,rgba(127,127,127,.45));}",
+			".dwsm-banner{padding:6px 10px;border-top:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.2));font-size:12px;background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.08));}",
+			".dwsm-hint{padding:8px 10px;border-top:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.2));font-size:12px;color:var(--dsw-alias-label-secondary,inherit);white-space:pre-wrap;line-height:1.7;}",
+			".dwsm-i{width:18px;height:18px;padding:0;border-radius:50%;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.45));background:transparent;color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font-size:11px;line-height:1;font-family:inherit;}",
+			".dwsm-i:hover{border-color:currentColor;color:var(--dsw-alias-label-primary,inherit);}",
 		].join("");
 		const CSS_TAG = "dsh-workspace-migrate/panel.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(CSS_TAG) + "]") === null) {
@@ -231,6 +235,16 @@ window.__ModuleLoader__.load({
 					head,
 				),
 				react.createElement("div", { className: "dwsm-disc-body", hidden: open ? undefined : true }, props.children),
+				// A banner sits between the summary and the detail and is visible either way: it
+				// carries what just happened to the row's own button.
+				props.banner === undefined || props.banner === null
+					? null
+					: react.createElement("div", { className: "dwsm-banner" }, props.banner),
+				// The hint answers "what do I do with this?", which is a question about the row, so
+				// it is not buried inside the collapsible detail.
+				props.hint === undefined || props.hint === null
+					? null
+					: react.createElement("div", { className: "dwsm-hint" }, props.hint),
 			);
 		}
 		//#endregion
@@ -259,6 +273,13 @@ window.__ModuleLoader__.load({
 			const [expanded, setExpanded] = react.useState({});
 			const rowOpen = (key, defaultOpen) => (expanded[key] === undefined ? defaultOpen === true : expanded[key] === true);
 			const toggleRow = (key) => setExpanded((current) => Object.assign({}, current, { [key]: current[key] !== true }));
+			/**
+			 * Outcome of the last「打开目录」attempt, attached to the row that asked for it.
+			 *
+			 * Launching a file manager produces no visible change inside the page, so without
+			 * this a successful request looks exactly like a dead button.
+			 */
+			const [openNotice, setOpenNotice] = react.useState(null);
 
 			/** Any change to the inputs invalidates a previous live verdict. */
 			const editFrom = (value) => {
@@ -328,30 +349,44 @@ window.__ModuleLoader__.load({
 			};
 
 			/** Reveal a staged run directory in the OS file manager. */
-			const openDirectory = (directory) => {
+			const openDirectory = (row, directory) => {
 				if (typeof directory !== "string" || directory.length === 0) {
-					setError("这条记录没有目录路径。");
+					setOpenNotice({ row: row, ok: false, text: "这条记录没有目录路径。" });
 					return;
 				}
+				setOpenNotice({ row: row, ok: true, text: "正在请求系统打开：" + directory });
 				callApi("/open-directory", { path: directory }).then(
 					(result) => {
-						if (result.payload && result.payload.ok === true) return;
+						if (result.payload && result.payload.ok === true) {
+							setOpenNotice({ row: row, ok: true, text: "已请求系统打开（若窗口没弹出，请看运行 DSH 的终端）：" + directory });
+							return;
+						}
 						// A non-JSON answer means the running HOST half has no such route: the client
 						// half can arrive with a page refresh, the host half only with a restart, so
 						// this mismatch is worth naming instead of showing a bare status code.
 						if (result.payload === null) {
-							setError(
-								"当前运行的宿主半体还是旧版本，没有 /open-directory 路由；重启 DSH 后「打开目录」才可用（HTTP " +
-									text(result.status) +
-									"）。",
-							);
+							setOpenNotice({
+								row: row,
+								ok: false,
+								text: "宿主半体还是旧版本，没有 /open-directory 路由；重启 DSH 后「打开目录」才可用（HTTP " + text(result.status) + "）。",
+							});
 							return;
 						}
-						setError(result.payload.error ? text(result.payload.error) : "无法打开目录（HTTP " + text(result.status) + "）");
+						setOpenNotice({ row: row, ok: false, text: result.payload.error ? text(result.payload.error) : "无法打开目录（HTTP " + text(result.status) + "）" });
 					},
-					(reason) => setError(String((reason && reason.message) || reason)),
+					(reason) => setOpenNotice({ row: row, ok: false, text: String((reason && reason.message) || reason) }),
 				);
 			};
+
+			/** The notice for one row, rendered where the user just clicked. */
+			const noticeFor = (row) =>
+				openNotice !== null && openNotice.row === row
+					? react.createElement(
+							"span",
+							{ className: openNotice.ok ? "dwsm-good" : "dwsm-bad" },
+							(openNotice.ok ? "[√] " : "[×] ") + openNotice.text,
+						)
+					: null;
 
 			const refresh = () => {
 				setBusy(true);
@@ -688,28 +723,13 @@ window.__ModuleLoader__.load({
 							{ key: "stage", className: "dwsm-list" },
 							react.createElement("div", { className: "dwsm-sub" }, "已暂存运行目录"),
 							react.createElement("div", { className: "dwsm-mono" }, text(plan.stage.dir)),
-							react.createElement(
-								"div",
-								{ className: "dwsm-sub" },
-								"退出 DSH 后依次执行：",
-							),
+							react.createElement("div", { className: "dwsm-sub" }, "退出 DSH 后依次执行："),
 							react.createElement(CodeLine, null, "1)  " + text(plan.stage.applyCmd)),
 							react.createElement(CodeLine, null, "2)  " + text(plan.stage.verifyCmd) + "   （必须全 PASS）"),
-							react.createElement(CodeLine, null, "3)  回滚： " + text(plan.stage.rollbackCmd)),
-							react.createElement(
-								"div",
-								{ className: "dwsm-row" },
-								react.createElement(
-									"button",
-									{
-										type: "button",
-										className: "dwsm-btn",
-										disabled: busy,
-										onClick: () => runVerify(plan.stage.planFile),
-									},
-									"立即只读校验（verify）",
-								),
-							),
+							// Rollback is not a third step of the happy path: it is the way out when
+							// step 1 or 2 went wrong, so it gets its own subheading and its own line.
+							react.createElement("div", { className: "dwsm-sub" }, "若遇到错误，可以回滚："),
+							react.createElement(CodeLine, null, "3)  " + text(plan.stage.rollbackCmd)),
 						),
 					);
 				}
@@ -733,12 +753,13 @@ window.__ModuleLoader__.load({
 													className: "dwsm-btn",
 													onClick: (event) => {
 														event.stopPropagation();
-														openDirectory(plan.stage.dir);
+														openDirectory("plan", plan.stage.dir);
 													},
 												},
 												"打开目录",
 											)
 										: null,
+								banner: noticeFor("plan"),
 							},
 							planChildren,
 						),
@@ -794,7 +815,7 @@ window.__ModuleLoader__.load({
 									type: "button",
 									className: "dwsm-btn",
 									disabled: busy,
-									onClick: () => openDirectory(run.dir),
+									onClick: () => openDirectory("runs", run.dir),
 								},
 								"打开目录",
 							),
@@ -812,6 +833,29 @@ window.__ModuleLoader__.load({
 								chip: { label: text(runs.length) + " 个", className: "dwsm-chip-info" },
 								open: expanded.runs === true,
 								onToggle: () => toggleRow("runs"),
+								// The rows are bare paths now, so the steps live behind this 「i」.
+								actions: react.createElement(
+									"button",
+									{
+										type: "button",
+										className: "dwsm-i",
+										title: "怎么用",
+										"aria-label": "怎么用",
+										onClick: (event) => {
+											event.stopPropagation();
+											toggleRow("hint");
+										},
+									},
+									"i",
+								),
+								hint:
+									expanded.hint === true
+										? "用法：先点「打开目录」，然后完全退出 DSH，再按顺序手动执行目录里的\n" +
+											"  1-apply-migration.cmd   （执行迁移）\n" +
+											"  2-verify.cmd            （校验，必须全 PASS）\n" +
+											"若中间报错，执行 3-rollback.cmd 回滚。"
+										: null,
+								banner: noticeFor("runs"),
 							},
 							rows,
 						),

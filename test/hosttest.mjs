@@ -394,6 +394,15 @@ console.log('\n[10] the open-directory route')
   ok('a staged directory is accepted', accepted.status === 200 && accepted.payload.ok === true, JSON.stringify(accepted.payload))
   ok('the answer names the directory', accepted.payload.path === staged, JSON.stringify(accepted.payload))
   ok('the launch is only reported, never performed, under the test seam', accepted.payload.launched === false, JSON.stringify(accepted.payload))
+  // On Windows the hand-off goes through the shell: `explorer.exe <dir>` is also the form that
+  // quietly does nothing when Explorer already shows that folder.
+  if (process.platform === 'win32') {
+    ok(
+      'the Windows launch uses the shell hand-off',
+      accepted.payload.command === 'cmd.exe' && Array.isArray(accepted.payload.args) && accepted.payload.args[1] === 'start',
+      JSON.stringify(accepted.payload),
+    )
+  }
   if (!previous) fs.rmSync(staged, { recursive: true, force: true })
   delete process.env.DSH_WORKSPACE_MIGRATE_DRY_OPEN
 }

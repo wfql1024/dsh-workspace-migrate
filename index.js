@@ -75,20 +75,28 @@ const API = '/api/dsh-workspace-migrate'
 /**
  * Reveal a directory in the OS file manager.
  *
+ * On Windows this goes through `cmd /c start "" <dir>` — the same shell hand-off the Run box
+ * uses. `explorer.exe <dir>` also works, but it is also the form that quietly does nothing
+ * (and reports nothing) when Explorer already has that folder open.
+ *
  * The answer waits for the `spawn`/`error` event rather than trusting `spawn()` to have
- * worked, so a missing `xdg-open` is reported instead of silently claimed as success.
- * `explorer.exe` exits non-zero even when it succeeds, so the exit code is deliberately
- * ignored — what matters is that the process started. The child is detached and unreferenced
- * because DSH must not hold the file manager open, nor wait for it to close.
+ * worked, so a missing `xdg-open` is reported instead of silently claimed as success. The
+ * child is detached and unreferenced because DSH must not hold the file manager open, nor
+ * wait for it to close.
  *
  * `DSH_WORKSPACE_MIGRATE_DRY_OPEN=1` reports what would be launched without launching it;
- * only the test suite sets it, so a test run never pops a window on the developer's screen.
+ * only the test suite and the diagnostic tool set it, so a test run never pops a window.
  */
 async function revealDirectory(directory) {
-  const command = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+  const windows = process.platform === 'win32'
+  const command = windows ? 'cmd.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+  const args = windows ? ['/c', 'start', '', directory] : [directory]
   if (process.env.DSH_WORKSPACE_MIGRATE_DRY_OPEN === '1') {
-    return { ok: true, command, path: directory, launched: false }
+    return { ok: true, command, args, path: directory, launched: false }
   }
+  // The DSH terminal is the only place that can confirm a GUI hand-off, so say it out loud
+  // there as well as in the UI.
+  console.log(`[dsh-workspace-migrate] opening ${directory}`)
   return await new Promise((settle) => {
     let settled = false
     const done = (value) => {
@@ -97,7 +105,7 @@ async function revealDirectory(directory) {
       settle(value)
     }
     try {
-      const child = spawn(command, [directory], { detached: true, stdio: 'ignore', windowsHide: true })
+      const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true })
       child.once('error', (error) => done({ ok: false, error: `could not open ${directory}: ${String((error && error.message) || error)}` }))
       child.once('spawn', () => {
         child.unref()
