@@ -74,6 +74,14 @@ DSH（DeepSeek Harness）插件：把一个工作区**整体搬到新路径**，
 
 回滚同样处理：把 writer 和 Session 的 header 指回旧路径，工件搬回去。
 
+### 一个会话目录可能有好几代日志
+
+DSH 升级会话日志格式时会写新一代、把旧一代留作历史，所以一个会话目录里可能同时有
+`session.jsonl.zstd`（v0）和 `session.v3.jsonl.zstd`（v3）。搬迁必须**把每一代都搬走**：
+只搬 writer 正在写的那一代，旧 key 下就还留着一份，同一个 session id 出现在两个 projectKey，
+DSH 会直接拒绝加载（`duplicate JSONL session id ... appears in multiple project directories`）。
+所以不停机路径逐个 generation 处理，搬完还会检查旧目录有没有残留，有就报错回滚。
+
 ### 为什么 header 要"保留原型"地重建
 
 `session.header` 是宿主 realm 里 `deepFreeze` 过的纯 JSON 记录，而插件代码跑在 Cordis 沙箱 realm。

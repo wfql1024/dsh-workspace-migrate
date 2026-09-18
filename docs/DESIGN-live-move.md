@@ -86,6 +86,9 @@ note: every session is running, so the spawned engine was not used at all
 | writer 数 vs live 会话数 | 5 vs 4 —— **存在没有 live Session 的写句柄**（标签页关了但句柄还在） | `flush` 必须兼容"只有 writer 没有 Session" |
 | `session.header` | **instance 数据属性、writable、configurable**；值本身 `deepFreeze` 且原型是**宿主 realm**的 `Object.prototype` | 可以改；但必须**保留原型**地重建（见 4.2） |
 | `sessions.flush(session)` | 传真实 Session → 返回 `true`；传 `undefined` → 在 DSH 内部读 `session.id` 抛错 | `flush` 只在有 Session 时调用，否则退到 `writer.flush()` |
+| **一个会话目录可以有多个 generation 日志** | 实测 `session-43de0fbd-…/` 下同时有 `session.jsonl.zstd`(v0, 7.1 MB, 17324 帧) 和 `session.v3.jsonl.zstd`(v3, 2.2 MB, 208 帧)；`locate()` 给的是 writer 正在写的那一代 | **搬迁必须把整个目录的所有 generation 一起搬**，只搬一代会让会话 id 同时出现在两个 projectKey，DSH 直接拒绝（见 3.3） |
+| `listArtifacts()` 的重扫描 | `dsh-session-persistence-jsonl/lib/index.js:2878`：**遍历整个 sessions 根目录**，同 id 出现在两个 projectKey 就 `throw duplicate JSONL session id` | `attachSession` 缓存 miss 时走它；所以"旧目录残留一代"必然在内存层炸 |
+| `sessionProjectionCache` 实际布局 | 读的是 `<root>/session_projcache/sessions/<id>.json`（per-record）；`identityMatches` 对不上就把记录当**不存在**（缓存 miss → 重建） | 迁移时不做 checkpoint 是安全的；实测迁移后每条会话的文档已自愈成新 cwd，旧版单文件表 `session_projcache.json` 里的死条目被忽略 |
 | `sessionProjectionCache` 方法 | `cachedSnapshot / cachedPredecessorTitle / hydratePrepared / write / coldSnapshot` 全在 | 公开契约要整个事件日志，故**不调用**；依赖其 fail-soft 自愈 |
 | `dshHomePath` | 是 **function** 不是字符串 | 用 env / homedir，不受影响 |
 
@@ -104,6 +107,32 @@ note: every session is running, so the spawned engine was not used at all
 
 离线假服务当时**太宽松**（`attachSession` 来者不拒、`delete` 是空操作），所以两个 bug 全漏了。
 现在假服务按真实行为建模（realpath 校验、缓存优先于磁盘、真的 splice），并配变异测试兜底。
+
+### 3.3 多 generation：只有"运行中的会话"会踩的坑（真机上第二次翻车）
+
+现象：把一条**正在对话**的会话迁到新工作区，项目目录已搬完、文件层也没报错，停在内存层：
+
+```
+迁移失败（阶段：memory-layer）
+阻止: the workspace registry refused the re-point: duplicate JSONL session id
+      "session-c13da96f-…" appears in multiple project directories
+文件已还原: 是
+```
+
+根因：那个会话目录里有**两代**日志（`session.jsonl.zstd` v0 + `session.v3.jsonl.zstd` v3，DSH 升级格式时保留旧一代作为历史）。
+不停机路径按 `persistence.locate()` 只搬了 **writer 正在写的那一代**，旧一代留在旧 projectKey 下；
+到内存层时 `attachSession` 缓存 miss → `listArtifacts()` **重扫整个 sessions 根目录** → 同 id 出现在两个 projectKey → 拒绝。
+冷会话路径没有这个问题，因为引擎是 `moveDirectory(session.dir, target)` 整目录搬、并遍历每一代改 header ——
+这也解释了为什么只有"运行中的对话"失败。
+
+修复：不停机路径枚举源目录里**所有** generation，逐个搬（每个只重压第 0 帧），全在同一段无 `await` 里完成；
+搬完检查旧目录是否残留 generation，残留就当场抛错回滚；回滚同样逐代搬回。
+
+真机验证（用户实测，迁移 `Mine\JhiFengMultiChat → My\JhiFengMultiChat`，2 条会话、1 条运行中）：
+4 个日志文件 frame 0 都是"恰好一行"且 cwd 已是新路径（其中 17324 帧的大日志只重压了第 0 帧）、
+旧 projectKey 目录消失、全库无重复 id、项目目录已随迁、
+**运行中会话的 v3 日志在迁移后 3 分 43 秒仍有写入**（13:43:12 迁移 → 13:46:55 追加）——
+writer 确实被重定向到了新文件。
 
 ---
 
