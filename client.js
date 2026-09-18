@@ -63,6 +63,20 @@ window.__ModuleLoader__.load({
 			".dwsm-mode-on{background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.2));color:var(--dsw-alias-label-primary,inherit);font-weight:500;}",
 			".dwsm-check{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;}",
 			".dwsm-btn-danger{border-color:var(--dsw-alias-state-error-primary,#e5534b);color:var(--dsw-alias-state-error-primary,#e5534b);}",
+			// One collapsed summary row per result: chevron + title + status chip, body hidden
+			// until the row is opened.
+			".dwsm-disc{border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.3));border-radius:8px;overflow:hidden;}",
+			".dwsm-disc-head{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:none;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer;}",
+			".dwsm-disc-head:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));}",
+			".dwsm-disc-body{padding:10px;border-top:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.2));}",
+			".dwsm-chev{display:inline-block;width:12px;color:var(--dsw-alias-label-secondary,inherit);}",
+			".dwsm-disc-title{font-weight:600;}",
+			".dwsm-spacer{flex:1 1 auto;}",
+			".dwsm-chip{padding:1px 8px;border-radius:10px;font-size:11px;font-weight:500;border:1px solid transparent;white-space:nowrap;}",
+			".dwsm-chip-ok{color:var(--dsw-alias-state-success-primary,#2da44e);border-color:currentColor;}",
+			".dwsm-chip-bad{color:var(--dsw-alias-state-error-primary,#e5534b);border-color:currentColor;}",
+			".dwsm-chip-warn{color:var(--dsw-alias-state-warn-primary,#bf8700);border-color:currentColor;}",
+			".dwsm-chip-info{color:var(--dsw-alias-label-secondary,inherit);border-color:var(--dsw-alias-border-l2,rgba(127,127,127,.45));}",
 		].join("");
 		const CSS_TAG = "dsh-workspace-migrate/panel.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(CSS_TAG) + "]") === null) {
@@ -173,6 +187,50 @@ window.__ModuleLoader__.load({
 				props.children,
 			);
 		}
+
+		/**
+		 * One result row: a summary line (chevron + title + status chip + optional actions) whose
+		 * body is present in the DOM but hidden until the row is opened.
+		 *
+		 * `hidden` rather than "do not render" keeps the detail one click away, and keeps the
+		 * summary readable without a wall of text underneath every action.
+		 */
+		function Disclosure(props) {
+			const open = props.open === true;
+			const head = [
+				react.createElement("span", { key: "chev", className: "dwsm-chev", "aria-hidden": "true" }, open ? "▾" : "▸"),
+				react.createElement("span", { key: "title", className: "dwsm-disc-title" }, text(props.title)),
+			];
+			if (props.chip !== undefined && props.chip !== null) {
+				head.push(react.createElement("span", { key: "chip", className: "dwsm-chip " + props.chip.className }, text(props.chip.label)));
+			}
+			head.push(react.createElement("span", { key: "spacer", className: "dwsm-spacer" }));
+			if (props.actions !== undefined && props.actions !== null) head.push(props.actions);
+			return react.createElement(
+				"div",
+				{ className: "dwsm-disc" },
+				// A div, not a button: the row can carry its own action buttons (「打开目录」), and a
+				// button nested inside a button is invalid HTML.
+				react.createElement(
+					"div",
+					{
+						className: "dwsm-disc-head",
+						role: "button",
+						tabIndex: 0,
+						"aria-expanded": open ? "true" : "false",
+						onClick: props.onToggle,
+						onKeyDown: (event) => {
+							if (event.key === "Enter" || event.key === " ") {
+								event.preventDefault();
+								props.onToggle();
+							}
+						},
+					},
+					head,
+				),
+				react.createElement("div", { className: "dwsm-disc-body", hidden: open ? undefined : true }, props.children),
+			);
+		}
 		//#endregion
 
 		//#region panel
@@ -187,11 +245,18 @@ window.__ModuleLoader__.load({
 			const [plan, setPlan] = react.useState(null);
 			const [verify, setVerify] = react.useState(null);
 			const [prefilled, setPrefilled] = react.useState(null);
-			/** "live" (no restart, preferred) or "plan" (the stop-DSH flow). */
-			const [mode, setMode] = react.useState("live");
+			/**
+			 * Manual mode: plan now, run the staged script while DSH is stopped. The live move is
+			 * the default because it is the normal path, not an advanced one.
+			 */
+			const [manual, setManual] = react.useState(false);
 			const [moveProject, setMoveProject] = react.useState(false);
 			const [liveInspect, setLiveInspect] = react.useState(null);
 			const [liveResult, setLiveResult] = react.useState(null);
+			/** Which result rows are open; an explicit toggle wins, otherwise the default applies. */
+			const [expanded, setExpanded] = react.useState({});
+			const rowOpen = (key, defaultOpen) => (expanded[key] === undefined ? defaultOpen === true : expanded[key] === true);
+			const toggleRow = (key) => setExpanded((current) => Object.assign({}, current, { [key]: current[key] !== true }));
 
 			/** Any change to the inputs invalidates a previous live verdict. */
 			const editFrom = (value) => {
@@ -205,7 +270,15 @@ window.__ModuleLoader__.load({
 				setLiveResult(null);
 			};
 
-			const inspectLive = () => {
+			/**
+			 * The one button that does the work.
+			 *
+			 * The read-only check runs first and gates the write: a refused check means nothing is
+			 * touched, and the row opens so the reason is visible without a second click. A passed
+			 * check continues straight into the migration — the two were only ever separate
+			 * because the check used to be a manual step.
+			 */
+			const startMigration = () => {
 				if (from.trim().length === 0 || to.trim().length === 0) {
 					setError("请先填写「从」和「到」两个路径。");
 					return;
@@ -218,9 +291,32 @@ window.__ModuleLoader__.load({
 				callApi("/live-inspect", { from: from.trim(), to: to.trim(), moveProject: moveProject }).then(
 					(result) => {
 						const payload = result.payload;
-						if (payload && typeof payload.ok === "boolean") setLiveInspect(payload);
-						else setError(payload && payload.error ? text(payload.error) : "预检失败（HTTP " + text(result.status) + "）");
-						setBusy(false);
+						if (!(payload && typeof payload.ok === "boolean")) {
+							setError(payload && payload.error ? text(payload.error) : "检查失败（HTTP " + text(result.status) + "）");
+							setBusy(false);
+							return;
+						}
+						setLiveInspect(payload);
+						if (payload.ok !== true) {
+							setBusy(false);
+							return;
+						}
+						callApi("/live-move", { from: from.trim(), to: to.trim(), moveProject: moveProject, confirm: true }).then(
+							(moved) => {
+								const outcome = moved.payload;
+								if (outcome && typeof outcome.ok === "boolean") {
+									setLiveResult(outcome);
+									if (outcome.ok === true) refresh();
+								} else {
+									setError(outcome && outcome.error ? text(outcome.error) : "迁移失败（HTTP " + text(moved.status) + "）");
+								}
+								setBusy(false);
+							},
+							(reason) => {
+								setError(String((reason && reason.message) || reason));
+								setBusy(false);
+							},
+						);
 					},
 					(reason) => {
 						setError(String((reason && reason.message) || reason));
@@ -229,25 +325,19 @@ window.__ModuleLoader__.load({
 				);
 			};
 
-			const runLiveMove = () => {
-				setBusy(true);
-				setError(null);
-				setLiveResult(null);
-				callApi("/live-move", { from: from.trim(), to: to.trim(), moveProject: moveProject, confirm: true }).then(
+			/** Reveal a staged run directory in the OS file manager. */
+			const openDirectory = (directory) => {
+				if (typeof directory !== "string" || directory.length === 0) {
+					setError("这条记录没有目录路径。");
+					return;
+				}
+				callApi("/open-directory", { path: directory }).then(
 					(result) => {
-						const payload = result.payload;
-						if (payload && typeof payload.ok === "boolean") {
-							setLiveResult(payload);
-							if (payload.ok === true) refresh();
-						} else {
-							setError(payload && payload.error ? text(payload.error) : "迁移失败（HTTP " + text(result.status) + "）");
+						if (!(result.payload && result.payload.ok === true)) {
+							setError(result.payload && result.payload.error ? text(result.payload.error) : "无法打开目录（HTTP " + text(result.status) + "）");
 						}
-						setBusy(false);
 					},
-					(reason) => {
-						setError(String((reason && reason.message) || reason));
-						setBusy(false);
-					},
+					(reason) => setError(String((reason && reason.message) || reason)),
 				);
 			};
 
@@ -342,7 +432,8 @@ window.__ModuleLoader__.load({
 				setVerify(null);
 				callApi("/verify", { planFile: planFile }).then(
 					(result) => {
-						setVerify(result.payload && result.payload.json ? result.payload.json : { ok: false, failures: [text(result.payload && result.payload.error) || "verify 失败"] });
+						const outcome = result.payload && result.payload.json ? result.payload.json : { ok: false, failures: [text(result.payload && result.payload.error) || "verify 失败"] };
+						setVerify(outcome);
 						setBusy(false);
 					},
 					(reason) => {
@@ -362,7 +453,7 @@ window.__ModuleLoader__.load({
 					react.createElement(
 						"div",
 						{ className: "dwsm-sub" },
-						"改项目路径 + 搬会话日志 + 同步工作区注册表与投影缓存。迁移必须在本机 DSH 完全退出后执行，本页只能做只读计划。",
+						"把工作区搬到新路径：项目目录、注册记录和全部会话一起迁走，正在对话的会话也不会中断。",
 					),
 				),
 			);
@@ -442,78 +533,57 @@ window.__ModuleLoader__.load({
 						}),
 					),
 					react.createElement(
-						"div",
-						{ className: "dwsm-row" },
-						react.createElement("span", { className: "dwsm-label" }, "方式"),
-						react.createElement(
-							"div",
-							{ className: "dwsm-modes" },
-							react.createElement(
-								"button",
-								{
-									type: "button",
-									className: "dwsm-mode" + (mode === "live" ? " dwsm-mode-on" : ""),
-									onClick: () => setMode("live"),
-								},
-								"不停机迁移（推荐）",
-							),
-							react.createElement(
-								"button",
-								{
-									type: "button",
-									className: "dwsm-mode" + (mode === "plan" ? " dwsm-mode-on" : ""),
-									onClick: () => setMode("plan"),
-								},
-								"停机计划",
-							),
-						),
+						"label",
+						{ className: "dwsm-check" },
+						react.createElement("input", {
+							type: "checkbox",
+							checked: moveProject,
+							onChange: (event) => {
+								setMoveProject(event.target.checked);
+								setLiveInspect(null);
+								setLiveResult(null);
+							},
+						}),
+						"目标目录还不存在，帮我把项目目录一起搬过去",
 					),
-					mode === "live"
-						? react.createElement(
-								"label",
-								{ className: "dwsm-check" },
-								react.createElement("input", {
-									type: "checkbox",
-									checked: moveProject,
-									onChange: (event) => {
-										setMoveProject(event.target.checked);
-										setLiveInspect(null);
-										setLiveResult(null);
-									},
-								}),
-								"目标目录还不存在，帮我把项目目录一起搬过去",
-							)
-						: null,
+					react.createElement(
+						"label",
+						{ className: "dwsm-check" },
+						react.createElement("input", {
+							type: "checkbox",
+							checked: manual,
+							onChange: (event) => {
+								setManual(event.target.checked);
+								setLiveInspect(null);
+								setLiveResult(null);
+								setPlan(null);
+							},
+						}),
+						"手动迁移（只生成计划，退出 DSH 后自己执行脚本）",
+					),
 					react.createElement(
 						"div",
 						{ className: "dwsm-row" },
-						mode === "live"
-							? react.createElement(
-									"button",
-									{ type: "button", className: "dwsm-btn dwsm-btn-primary", disabled: busy, onClick: inspectLive },
-									busy ? "处理中…" : "预检（只读，不改任何东西）",
-								)
-							: react.createElement(
-									"button",
-									{ type: "button", className: "dwsm-btn dwsm-btn-primary", disabled: busy, onClick: makePlan },
-									busy ? "处理中…" : "生成迁移计划（只读 dry-run）",
-								),
-						mode === "live" && liveInspect !== null && liveInspect.ok === true
-							? react.createElement(
-									"button",
-									{ type: "button", className: "dwsm-btn dwsm-btn-danger", disabled: busy, onClick: runLiveMove },
-									"执行不停机迁移",
-								)
-							: null,
+						react.createElement(
+							"button",
+							{
+								type: "button",
+								className: "dwsm-btn dwsm-btn-primary",
+								disabled: busy,
+								onClick: manual ? makePlan : startMigration,
+							},
+							busy ? "处理中…" : manual ? "计划" : "开始迁移",
+						),
 						react.createElement("button", { type: "button", className: "dwsm-btn", disabled: busy, onClick: refresh }, "刷新状态"),
 					),
 				),
 			);
 
-			// live verdict / result
+			// Every result is one collapsed summary row; open it for the detail.
 			if (liveInspect !== null) {
+				const passed = liveInspect.ok === true;
 				const lines = [];
-				lines.push(liveInspect.ok === true ? "[√] 预检结论：可以迁移（不需要关 DSH）" : "[×] 预检结论：会被拒绝");
+				lines.push(passed ? "[√] 检查通过：可以迁移，正在继续。" : "[×] 检查未通过，没有执行任何改动。");
 				for (const blocker of liveInspect.blockers || []) lines.push("[×] " + text(blocker));
 				for (const note of liveInspect.notes || []) lines.push(marked(note));
 				if (liveInspect.project) {
@@ -525,12 +595,28 @@ window.__ModuleLoader__.load({
 					);
 				}
 				lines.push("待迁移会话: " + text((liveInspect.sessionIds || []).length) + " 个");
-				children.push(react.createElement("div", { className: "dwsm-card", key: "liveinspect" }, react.createElement(CodeLine, null, lines.join("\n"))));
+				children.push(
+					react.createElement(
+						"div",
+						{ key: "check" },
+						react.createElement(
+							Disclosure,
+							{
+								title: "Check",
+								chip: { label: passed ? "成功" : "失败", className: passed ? "dwsm-chip-ok" : "dwsm-chip-bad" },
+								open: rowOpen("check", liveInspect.ok !== true),
+								onToggle: () => toggleRow("check"),
+							},
+							react.createElement(CodeLine, null, lines.join("\n")),
+						),
+					),
+				);
 			}
 
 			if (liveResult !== null) {
 				const lines = [];
-				if (liveResult.ok === true) {
+				const done = liveResult.ok === true;
+				if (done) {
 					lines.push("[√] 迁移完成（全程未关闭 DSH）");
 					lines.push("会话: " + text(liveResult.movedCount) + " 个");
 					lines.push(text(liveResult.from) + "  ->  " + text(liveResult.to));
@@ -550,8 +636,17 @@ window.__ModuleLoader__.load({
 				children.push(
 					react.createElement(
 						"div",
-						{ className: "dwsm-card", key: "liveresult" },
-						react.createElement(CodeLine, null, lines.join("\n")),
+						{ key: "migrate" },
+						react.createElement(
+							Disclosure,
+							{
+								title: "Migrate",
+								chip: { label: done ? "成功" : "失败", className: done ? "dwsm-chip-ok" : "dwsm-chip-bad" },
+								open: rowOpen("migrate", liveResult.ok !== true),
+								onToggle: () => toggleRow("migrate"),
+							},
+							react.createElement(CodeLine, null, lines.join("\n")),
+						),
 					),
 				);
 			}
@@ -559,7 +654,8 @@ window.__ModuleLoader__.load({
 			// plan result
 			if (plan !== null) {
 				const lines = [];
-				lines.push(plan.ok === true ? "[√] 结论：可以执行（READY）" : "[×] 结论：被阻止（BLOCKED）");
+				const ready = plan.ok === true;
+				lines.push(ready ? "[√] 结论：可以执行（READY）" : "[×] 结论：被阻止（BLOCKED）");
 				lines.push("projectKey: " + text(plan.oldKey));
 				lines.push("         -> " + text(plan.newKey));
 				lines.push("待迁移会话: " + text(plan.sessions ? plan.sessions.toMigrate.length : "?") + " 个（跳过 " + text(plan.sessions ? plan.sessions.foreign.length : "?") + "，已在目标 " + text(plan.sessions ? plan.sessions.alreadyAtNew.length : "?") + "）");
@@ -603,36 +699,76 @@ window.__ModuleLoader__.load({
 						),
 					);
 				}
-				children.push(react.createElement("div", { className: "dwsm-card", key: "plan" }, planChildren));
-			}
-
-			if (verify !== null) {
-				const lines = [];
-				for (const check of verify.checks || []) lines.push((check.ok ? "[√]" : "[×]") + " " + text(check.name) + "  " + text(check.detail));
-				for (const note of verify.notes || []) lines.push(marked(note));
-				lines.push((verify.ok ? "[√]" : "[×]") + " 结论: " + (verify.ok ? "ALL CHECKS PASS" : text((verify.failures || []).length) + " 项失败"));
 				children.push(
 					react.createElement(
 						"div",
-						{ className: "dwsm-card", key: "verify" },
-						react.createElement("div", { className: "dwsm-sub" }, "校验结果（检测到当前状态：" + text(verify.detectedState) + "）"),
-						react.createElement(CodeLine, null, lines.join("\n")),
+						{ key: "plan" },
+						react.createElement(
+							Disclosure,
+							{
+								title: "Plan",
+								chip: { label: ready ? "可执行" : "被阻止", className: ready ? "dwsm-chip-ok" : "dwsm-chip-bad" },
+								open: expanded.plan === true,
+								onToggle: () => toggleRow("plan"),
+								actions:
+									plan.stage && typeof plan.stage.dir === "string"
+										? react.createElement(
+												"button",
+												{
+													type: "button",
+													className: "dwsm-btn",
+													onClick: (event) => {
+														event.stopPropagation();
+														openDirectory(plan.stage.dir);
+													},
+												},
+												"打开目录",
+											)
+										: null,
+							},
+							planChildren,
+						),
 					),
 				);
 			}
 
-			// staged runs
+			if (verify !== null) {
+				const lines = [];
+				const ok = verify.ok === true;
+				for (const check of verify.checks || []) lines.push((check.ok ? "[√]" : "[×]") + " " + text(check.name) + "  " + text(check.detail));
+				for (const note of verify.notes || []) lines.push(marked(note));
+				lines.push((ok ? "[√]" : "[×]") + " 结论: " + (ok ? "ALL CHECKS PASS" : text((verify.failures || []).length) + " 项失败"));
+				children.push(
+					react.createElement(
+						"div",
+						{ key: "verify" },
+						react.createElement(
+							Disclosure,
+							{
+								title: "Verify",
+								chip: { label: ok ? "全部通过" : text((verify.failures || []).length) + " 项失败", className: ok ? "dwsm-chip-ok" : "dwsm-chip-bad" },
+								open: rowOpen("verify", verify.ok !== true),
+								onToggle: () => toggleRow("verify"),
+							},
+							react.createElement("div", { className: "dwsm-sub" }, "检测到当前状态：" + text(verify.detectedState)),
+							react.createElement(CodeLine, null, lines.join("\n")),
+						),
+					),
+				);
+			}
+
+			// staged manual runs, collapsed into one row
 			if (state && Array.isArray(state.runs)) {
 				const runs = state.runs.slice().reverse();
 				const rows = [
 					react.createElement(
 						"div",
 						{ className: "dwsm-sub", key: "t" },
-						"已暂存迁移：" + text(runs.length) + " 个   ·   备份目录：" + text(state.backupRoot || "（默认）"),
+						"备份目录：" + text(state.backupRoot || "（默认）"),
 					),
 				];
 				if (runs.length === 0) {
-					rows.push(react.createElement("div", { className: "dwsm-sub", key: "none" }, "还没有暂存记录。填好路径后点「生成迁移计划」。"));
+					rows.push(react.createElement("div", { className: "dwsm-sub", key: "none" }, "还没有暂存记录。勾选「手动迁移」后点「计划」。"));
 				}
 				for (const run of runs) {
 					rows.push(
@@ -651,27 +787,46 @@ window.__ModuleLoader__.load({
 								react.createElement("div", { className: "dwsm-mono" }, "退出 DSH 后执行：" + text(run.applyCmd || "")),
 							),
 							react.createElement(
-								"button",
-								{
-									type: "button",
-									className: "dwsm-btn",
-									disabled: busy,
-									onClick: () => runVerify(run.planFile),
-								},
-								"verify",
+								"div",
+								{ className: "dwsm-row" },
+								react.createElement(
+									"button",
+									{
+										type: "button",
+										className: "dwsm-btn",
+										disabled: busy,
+										onClick: () => openDirectory(run.dir),
+									},
+									"打开目录",
+								),
+								react.createElement(
+									"button",
+									{
+										type: "button",
+										className: "dwsm-btn",
+										disabled: busy,
+										onClick: () => runVerify(run.planFile),
+									},
+									"verify",
+								),
 							),
 						),
 					);
 				}
-				children.push(react.createElement("div", { className: "dwsm-card", key: "runs" }, rows));
-			}
-
-			if (state) {
 				children.push(
 					react.createElement(
 						"div",
-						{ className: "dwsm-sub", key: "env" },
-						"DSH_HOME: " + text(state.dshHome) + "   ·   引擎: " + text(state.engine),
+						{ key: "runs" },
+						react.createElement(
+							Disclosure,
+							{
+								title: "暂存的手动迁移",
+								chip: { label: text(runs.length) + " 个", className: "dwsm-chip-info" },
+								open: expanded.runs === true,
+								onToggle: () => toggleRow("runs"),
+							},
+							rows,
+						),
 					),
 				);
 			}

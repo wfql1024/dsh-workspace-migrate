@@ -26,7 +26,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inspectLiveMove, liveMoveSessions } from './lib/live-move.mjs'
 
@@ -71,6 +71,46 @@ const ENGINE = fileURLToPath(new URL('./lib/dsh-workspace-migrate.mjs', import.m
 
 /** Route namespace owned by this plugin. */
 const API = '/api/dsh-workspace-migrate'
+
+/**
+ * Reveal a directory in the OS file manager.
+ *
+ * The answer waits for the `spawn`/`error` event rather than trusting `spawn()` to have
+ * worked, so a missing `xdg-open` is reported instead of silently claimed as success.
+ * `explorer.exe` exits non-zero even when it succeeds, so the exit code is deliberately
+ * ignored — what matters is that the process started. The child is detached and unreferenced
+ * because DSH must not hold the file manager open, nor wait for it to close.
+ *
+ * `DSH_WORKSPACE_MIGRATE_DRY_OPEN=1` reports what would be launched without launching it;
+ * only the test suite sets it, so a test run never pops a window on the developer's screen.
+ */
+async function revealDirectory(directory) {
+  const command = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+  if (process.env.DSH_WORKSPACE_MIGRATE_DRY_OPEN === '1') {
+    return { ok: true, command, path: directory, launched: false }
+  }
+  return await new Promise((settle) => {
+    let settled = false
+    const done = (value) => {
+      if (settled) return
+      settled = true
+      settle(value)
+    }
+    try {
+      const child = spawn(command, [directory], { detached: true, stdio: 'ignore', windowsHide: true })
+      child.once('error', (error) => done({ ok: false, error: `could not open ${directory}: ${String((error && error.message) || error)}` }))
+      child.once('spawn', () => {
+        child.unref()
+        done({ ok: true, command, path: directory })
+      })
+      // A file manager that never signals must not hold the request open.
+      const timer = setTimeout(() => done({ ok: true, command, path: directory, unconfirmed: true }), 1500)
+      if (typeof timer.unref === 'function') timer.unref()
+    } catch (error) {
+      done({ ok: false, error: `could not open ${directory}: ${String((error && error.message) || error)}` })
+    }
+  })
+}
 
 /** Request bodies are small JSON documents; this bound covers every action. */
 const BODY_MAX_BYTES = 512 * 1024
@@ -788,6 +828,42 @@ function makeRoutes(ctx) {
         } catch (error) {
           writeJson(res, 500, { ok: false, error: String((error && error.message) || error) })
         }
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${API}/open-directory`,
+      handler: async (req, res) => {
+        if (!fenced(req, res) || !requirePost(req, res)) return
+        const body = await readJsonBody(req)
+        const requested = asString(body.path)
+        if (requested.length === 0) {
+          writeJson(res, 400, { ok: false, error: 'path is required' })
+          return
+        }
+        // Only directories this plugin itself stages may be revealed: the browser must not be
+        // able to ask the host to open an arbitrary path from the user's machine.
+        const runsRoot = resolve(join(dshHome(), 'migration-runs'))
+        const target = resolve(requested)
+        if (target !== runsRoot && !target.startsWith(runsRoot + sep)) {
+          writeJson(res, 403, {
+            ok: false,
+            error: `only directories under ${runsRoot} can be opened`,
+          })
+          return
+        }
+        try {
+          const info = await stat(target)
+          if (!info.isDirectory()) {
+            writeJson(res, 400, { ok: false, error: `not a directory: ${target}` })
+            return
+          }
+        } catch {
+          writeJson(res, 404, { ok: false, error: `no such directory: ${target}` })
+          return
+        }
+        const revealed = await revealDirectory(target)
+        writeJson(res, revealed.ok === true ? 200 : 500, revealed)
       },
     },
     {

@@ -115,17 +115,18 @@ const PANEL_HOOKS = [
 	'plan',
 	'verify',
 	'prefilled',
-	'mode',
+	'manual',
 	'moveProject',
 	'liveInspect',
 	'liveResult',
+	'expanded',
 ]
 
 /** Render `Panel` with selected hook slots pre-set. */
 async function renderPanelWith(overrides) {
 	// Slot 0 is the dialog state the panel reads (`useDialog()`), the rest mirror Panel's own
 	// `useState` defaults. `open: true` keeps every section rendered.
-	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, 'live', false, null, null]
+	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, false, false, null, null, {}]
 	for (const [name, value] of Object.entries(overrides)) {
 		const slot = PANEL_HOOKS.indexOf(name)
 		if (slot === -1) throw new Error(`unknown panel hook: ${name}`)
@@ -308,13 +309,14 @@ ok('the panel localizes the path state instead of printing raw enum values', pan
 const placeholders = [...panelHtml.matchAll(/placeholder="([^"]*)"/g)].map((match) => match[1])
 ok('every placeholder is path-free', placeholders.length > 0 && placeholders.every((value) => !/[A-Za-z]:[\\/]/.test(value)), JSON.stringify(placeholders))
 ok('the panel lists staged runs', panelHtml.includes('D:/old/DemoProject') && panelHtml.includes('尚未执行'))
+ok('the staged runs are one collapsed row, named for the manual flow', panelHtml.includes('暂存的手动迁移') && !panelHtml.includes('已暂存迁移'), 'the runs row must be a single summary row')
+ok('the staged run row offers to open its directory', panelHtml.includes('打开目录'), 'missing the open-directory action')
 ok('the panel tells the user which runner to double-click after quitting DSH', panelHtml.includes('退出 DSH 后执行'), 'missing the apply-command hint')
-ok('the panel offers the stop-DSH plan mode', panelHtml.includes('停机计划'))
-ok('the panel defaults to the no-restart live mode', panelHtml.includes('不停机迁移（推荐）') && panelHtml.includes('预检'))
-ok('the live mode offers to move the project directory too', panelHtml.includes('帮我把项目目录一起搬过去'))
-ok('the panel states the shutdown requirement for the plan mode', panelHtml.includes('完全退出'))
-ok('the destructive live action is NOT offered before a preflight passes', !panelHtml.includes('执行不停机迁移'), 'the execute button must stay hidden until inspect says ok')
-ok('the panel shows the DSH home and engine path', panelHtml.includes('C:/Users/probe/.dsh') && panelHtml.includes('dsh-workspace-migrate.mjs'))
+ok('the manual mode is a checkbox, not a mode switch', panelHtml.includes('手动迁移') && !panelHtml.includes('不停机迁移（推荐）') && !panelHtml.includes('>方式<'), 'the manual flow must be behind a checkbox')
+ok('the primary action is a plain「开始迁移」', panelHtml.includes('开始迁移') && !panelHtml.includes('预检'), 'the preflight step must be folded into the action')
+ok('the panel no longer prints the home directory or the engine path', !panelHtml.includes('DSH_HOME:') && !panelHtml.includes('引擎:'), 'internal paths are not user-facing')
+ok('the panel states the shutdown requirement for the manual flow', panelHtml.includes('退出 DSH 后自己执行脚本'))
+ok('the panel still offers to move the project directory too', panelHtml.includes('帮我把项目目录一起搬过去'))
 ok('no crash placeholder leaked into the markup', !panelHtml.includes('undefined'))
 
 console.log('\n[5] entries')
@@ -402,7 +404,8 @@ console.log('\n[8] the conversation-header entry preselects its own session work
 console.log('\n[7] signal markers in the result dialog')
 {
 	// The user reads this dialog to decide whether something went wrong. Every line has to say
-	// which it is: `[√]` done, `[!]` degraded but handled, `[×]` failed, `[i]` context.
+	// which it is: `[√]` done, `[!]` degraded but handled, `[×]` failed, `[i]` context. The detail
+	// lives in a collapsed row, so the summary carries a status chip with a colour class.
 	const success = await renderPanelWith({
 		from: 'D:/old/DemoProject',
 		to: 'E:/new/DemoProject',
@@ -433,6 +436,17 @@ console.log('\n[7] signal markers in the result dialog')
 	ok('a marked note is not double-labelled with「提示」', !success.includes('提示: [√]') && !success.includes('提示: [!]'), 'the host marker and the fallback label both rendered')
 	ok('an unmarked legacy note still gets a label', success.includes('提示: legacy unmarked note'))
 
+	// One summary row per phase, coloured by status, collapsed by default.
+	ok('the check result is a labelled row', success.includes('dwsm-disc-title">Check<'), success.slice(0, 400))
+	ok('the migrate result is a labelled row', success.includes('dwsm-disc-title">Migrate<'))
+	ok('a successful row carries the success chip', success.includes('dwsm-chip-ok">成功<'), 'missing the success chip')
+	ok('a failed row carries the failure chip', !success.includes('dwsm-chip-bad">失败<'), 'a successful run must not show a failure chip')
+	// The stub renders React prop names as attribute names, so the body tag is `className=`.
+	ok('the rows are one click targets', success.includes('role="button"') && success.includes('aria-expanded="false"'), 'the summary row must announce its state')
+	ok('the row header is not a button wrapping a button', !/<button[^>]*className="dwsm-disc-head"/.test(success), 'a button inside a button is invalid HTML')
+	ok('a successful row stays collapsed', /className="dwsm-disc-body" hidden="true">[\s\S]*?迁移完成/.test(success), 'a success needs no unfold')
+
+	// The check gates the write: a refused check means no migration, and its reason is shown.
 	const failure = await renderPanelWith({
 		from: 'D:/old/DemoProject',
 		to: 'E:/new/DemoProject',
@@ -448,6 +462,7 @@ console.log('\n[7] signal markers in the result dialog')
 	ok('a blocker is marked failed', failure.includes('[×] the workspace registry refused the re-point'))
 	ok('a successful rollback reads as a positive', failure.includes('[√] 文件已还原: 是'))
 	ok('a degraded note stays a warning', failure.includes('[!] the registry exposes no header index'))
+	ok('the failed row is opened for the user', /className="dwsm-disc-body">[\s\S]*?迁移失败/.test(failure), 'a failure must show its reason without a further click')
 
 	const blocked = await renderPanelWith({
 		liveInspect: {
@@ -458,9 +473,34 @@ console.log('\n[7] signal markers in the result dialog')
 			sessionIds: [],
 		},
 	})
-	ok('a refused preflight is marked failed', blocked.includes('[×] 预检结论：会被拒绝'), blocked.slice(0, 200))
+	ok('a refused check is marked failed', blocked.includes('[×] 检查未通过'), blocked.slice(0, 200))
 	ok('its blockers are marked failed', blocked.includes('[×] the destination already exists'))
-	ok('the execute button stays hidden while the preflight is refused', !blocked.includes('执行不停机迁移'))
+	ok('a refused check carries the failure chip', blocked.includes('dwsm-chip-bad">失败<'))
+	ok('no migration result is shown when the check refused', !blocked.includes('dwsm-disc-title">Migrate<'))
+
+	// Manual mode turns the same button into「计划」and the plan row offers the folder.
+	const manualPanel = await renderPanelWith({ manual: true, from: 'D:/old/DemoProject', to: 'E:/new/DemoProject' })
+	ok('manual mode relabels the action to「计划」', manualPanel.includes('>计划<') && !manualPanel.includes('>开始迁移<'), 'the action label must follow the checkbox')
+
+	const plan = await renderPanelWith({
+		manual: true,
+		plan: {
+			ok: true,
+			oldKey: '--D-old-DemoProject--',
+			newKey: '--E-new-DemoProject--',
+			sessions: { toMigrate: [{}], foreign: [], alreadyAtNew: [] },
+			metadata: { patches: [{}] },
+			project: { action: 'move' },
+			running: { dshProcesses: [] },
+			warnings: [],
+			errors: [],
+			stage: { dir: 'C:/Users/probe/.dsh/migration-runs/run-1', planFile: 'C:/Users/probe/.dsh/migration-runs/run-1/plan.json', applyCmd: 'a.cmd', verifyCmd: 'v.cmd', rollbackCmd: 'r.cmd' },
+		},
+	})
+	ok('the plan result is one labelled row', plan.includes('dwsm-disc-title">Plan<'), plan.slice(0, 300))
+	ok('the plan row carries its status chip', plan.includes('dwsm-chip-ok">可执行<'))
+	ok('the plan row offers to open the staged directory without expanding', plan.includes('打开目录'), 'the open-directory action belongs on the summary row')
+	ok('the plan result stays collapsed to one line', plan.includes('dwsm-disc-title">Plan<') && plan.includes('hidden="true"'), 'a plan must not unfold by itself')
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

@@ -117,7 +117,7 @@ async function call(path, { method = 'GET', body, ...rest } = {}) {
 console.log('\n[1] mounting')
 ok('plugin exposes a name', plugin.name === 'dsh-workspace-migrate', plugin.name)
 ok('plugin injects webServer', Array.isArray(plugin.inject) && plugin.inject.includes('webServer'))
-ok('registers eight routes', routes.length === 8, `got ${routes.length}: ${routes.map((r) => r.path).join(', ')}`)
+ok('registers nine routes', routes.length === 9, `got ${routes.length}: ${routes.map((r) => r.path).join(', ')}`)
 ok('every route is exact-kind', routes.every((route) => route.kind === 'exact'))
 ok('registers the workspace_migrate tool', tool !== null && tool.name === 'workspace_migrate', tool ? tool.name : 'none')
 ok('tool declares all five actions', JSON.stringify(tool.parameters.properties.action.enum) === JSON.stringify(['live', 'plan', 'status', 'verify', 'apply']), JSON.stringify(tool.parameters.properties.action.enum))
@@ -268,7 +268,7 @@ console.log('\n[8] a colliding route must not take down the plugin')
 		threw = error
 	}
 	ok('apply() survives a colliding route', threw === null, threw && threw.message)
-	ok('the remaining routes still mounted', partial.length === 7, `${partial.length}: ${partial.join(', ')}`)
+	ok('the remaining routes still mounted', partial.length === 8, `${partial.length}: ${partial.join(', ')}`)
 	ok('the colliding route is the only one missing', !partial.some((p) => p.endsWith('/state')))
 }
 
@@ -362,6 +362,40 @@ console.log('\n[10] the live action forwards every documented option to the regi
   ok('it reports the later file-layer failure rather than claiming success', result.ok === false, result.summary)
   ok('the register/rollback cycle left no destination registration behind', !entities.some((entity) => entity.id === 'ws-2'), JSON.stringify(entities.map((e) => e.id)))
   fs.rmSync(root, { recursive: true, force: true })
+}
+
+console.log('\n[10] the open-directory route')
+{
+  // The UI's「打开目录」must not become a way for the page to open an arbitrary path: only
+  // directories this plugin stages under <DSH_HOME>/migration-runs may be revealed.
+  const home = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh')
+  const runsRoot = path.join(home, 'migration-runs')
+
+  const outside = await call('/api/dsh-workspace-migrate/open-directory', { method: 'POST', body: { path: os.tmpdir() } })
+  ok('a path outside the run root is refused', outside.status === 403, `status ${outside.status}`)
+  ok('the refusal names the run root', JSON.stringify(outside.payload).includes('migration-runs'), JSON.stringify(outside.payload))
+
+  const missing = await call('/api/dsh-workspace-migrate/open-directory', { method: 'POST', body: {} })
+  ok('a request without a path is refused', missing.status === 400, `status ${missing.status}`)
+
+  const absent = await call('/api/dsh-workspace-migrate/open-directory', { method: 'POST', body: { path: path.join(runsRoot, 'no-such-run') } })
+  ok('a directory that does not exist is a 404', absent.status === 404, `status ${absent.status}`)
+
+  const traversal = await call('/api/dsh-workspace-migrate/open-directory', { method: 'POST', body: { path: path.join(runsRoot, '..', 'storages') } })
+  ok('a traversal out of the run root is refused', traversal.status === 403, `status ${traversal.status}`)
+
+  // A real staged directory is accepted. The launch seam keeps a test run from opening a file
+  // manager on the developer's screen, and makes the launch itself observable.
+  process.env.DSH_WORKSPACE_MIGRATE_DRY_OPEN = '1'
+  const staged = path.join(runsRoot, 'run-for-test')
+  const previous = fs.existsSync(staged)
+  fs.mkdirSync(staged, { recursive: true })
+  const accepted = await call('/api/dsh-workspace-migrate/open-directory', { method: 'POST', body: { path: staged } })
+  ok('a staged directory is accepted', accepted.status === 200 && accepted.payload.ok === true, JSON.stringify(accepted.payload))
+  ok('the answer names the directory', accepted.payload.path === staged, JSON.stringify(accepted.payload))
+  ok('the launch is only reported, never performed, under the test seam', accepted.payload.launched === false, JSON.stringify(accepted.payload))
+  if (!previous) fs.rmSync(staged, { recursive: true, force: true })
+  delete process.env.DSH_WORKSPACE_MIGRATE_DRY_OPEN
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)
