@@ -407,7 +407,9 @@ window.__ModuleLoader__.load({
 				setError(null);
 				setPlan(null);
 				setVerify(null);
-				callApi("/plan", { from: from.trim(), to: to.trim() }).then(
+				// The project-directory checkbox applies to the manual flow too: without this the
+				// staged script would leave the project where it is and the checkbox would lie.
+				callApi("/plan", { from: from.trim(), to: to.trim(), project: moveProject ? "move" : "keep" }).then(
 					(result) => {
 						const payload = result.payload;
 						if (payload && payload.ok === true && payload.json) {
