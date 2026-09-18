@@ -308,10 +308,15 @@ ok('the panel localizes the path state instead of printing raw enum values', pan
 // DSH home further down, which is not a hard-coded author path.
 const placeholders = [...panelHtml.matchAll(/placeholder="([^"]*)"/g)].map((match) => match[1])
 ok('every placeholder is path-free', placeholders.length > 0 && placeholders.every((value) => !/[A-Za-z]:[\\/]/.test(value)), JSON.stringify(placeholders))
-ok('the panel lists staged runs', panelHtml.includes('D:/old/DemoProject') && panelHtml.includes('尚未执行'))
+ok('a staged run is one line: where it goes', panelHtml.includes('D:/old/DemoProject') && panelHtml.includes('E:/new/DemoProject'), 'the staged row must show its from -> to line')
 ok('the staged runs are one collapsed row, named for the manual flow', panelHtml.includes('暂存的手动迁移') && !panelHtml.includes('已暂存迁移'), 'the runs row must be a single summary row')
 ok('the staged run row offers to open its directory', panelHtml.includes('打开目录'), 'missing the open-directory action')
-ok('the panel tells the user which runner to double-click after quitting DSH', panelHtml.includes('退出 DSH 后执行'), 'missing the apply-command hint')
+ok(
+	'the staged run row drops the detail that cannot be used there',
+	!panelHtml.includes('尚未执行') && !panelHtml.includes('退出 DSH 后执行：') && !panelHtml.includes('备份目录：'),
+	'a staged row is the path line plus one button',
+)
+ok('no verify button is offered for a staged run', !/dwsm-item[\s\S]{0,400}?verify/.test(panelHtml), 'verify is the second script, run while DSH is down')
 ok('the manual mode is a checkbox, not a mode switch', panelHtml.includes('手动迁移') && !panelHtml.includes('不停机迁移（推荐）') && !panelHtml.includes('>方式<'), 'the manual flow must be behind a checkbox')
 ok('the primary action is a plain「开始迁移」', panelHtml.includes('开始迁移') && !panelHtml.includes('预检'), 'the preflight step must be folded into the action')
 ok('the panel no longer prints the home directory or the engine path', !panelHtml.includes('DSH_HOME:') && !panelHtml.includes('引擎:'), 'internal paths are not user-facing')
@@ -480,7 +485,7 @@ console.log('\n[7] signal markers in the result dialog')
 
 	// Manual mode turns the same button into「计划」and the plan row offers the folder.
 	const manualPanel = await renderPanelWith({ manual: true, from: 'D:/old/DemoProject', to: 'E:/new/DemoProject' })
-	ok('manual mode relabels the action to「计划」', manualPanel.includes('>计划<') && !manualPanel.includes('>开始迁移<'), 'the action label must follow the checkbox')
+	ok('manual mode relabels the action to「生成计划」', manualPanel.includes('>生成计划<') && !manualPanel.includes('>开始迁移<'), 'the action label must follow the checkbox')
 
 	const plan = await renderPanelWith({
 		manual: true,
@@ -500,6 +505,13 @@ console.log('\n[7] signal markers in the result dialog')
 	ok('the plan result is one labelled row', plan.includes('dwsm-disc-title">Plan<'), plan.slice(0, 300))
 	ok('the plan row carries its status chip', plan.includes('dwsm-chip-ok">可执行<'))
 	ok('the plan row offers to open the staged directory without expanding', plan.includes('打开目录'), 'the open-directory action belongs on the summary row')
+	// The action hugs the status chip; only the spacer follows it.
+	const planHead = plan.slice(plan.indexOf('dwsm-disc-title">Plan<'), plan.indexOf('dwsm-disc-body'))
+	ok(
+		'the plan action sits right after its status chip',
+		planHead.indexOf('打开目录') > planHead.indexOf('dwsm-chip-ok') && planHead.indexOf('打开目录') < planHead.indexOf('dwsm-spacer'),
+		planHead,
+	)
 	ok('the plan result stays collapsed to one line', plan.includes('dwsm-disc-title">Plan<') && plan.includes('hidden="true"'), 'a plan must not unfold by itself')
 }
 

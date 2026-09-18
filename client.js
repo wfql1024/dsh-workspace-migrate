@@ -204,8 +204,10 @@ window.__ModuleLoader__.load({
 			if (props.chip !== undefined && props.chip !== null) {
 				head.push(react.createElement("span", { key: "chip", className: "dwsm-chip " + props.chip.className }, text(props.chip.label)));
 			}
-			head.push(react.createElement("span", { key: "spacer", className: "dwsm-spacer" }));
+			// Row actions sit right after the status chip, where the eye already is; the spacer
+			// only pushes the remainder of the row out.
 			if (props.actions !== undefined && props.actions !== null) head.push(props.actions);
+			head.push(react.createElement("span", { key: "spacer", className: "dwsm-spacer" }));
 			return react.createElement(
 				"div",
 				{ className: "dwsm-disc" },
@@ -333,9 +335,19 @@ window.__ModuleLoader__.load({
 				}
 				callApi("/open-directory", { path: directory }).then(
 					(result) => {
-						if (!(result.payload && result.payload.ok === true)) {
-							setError(result.payload && result.payload.error ? text(result.payload.error) : "无法打开目录（HTTP " + text(result.status) + "）");
+						if (result.payload && result.payload.ok === true) return;
+						// A non-JSON answer means the running HOST half has no such route: the client
+						// half can arrive with a page refresh, the host half only with a restart, so
+						// this mismatch is worth naming instead of showing a bare status code.
+						if (result.payload === null) {
+							setError(
+								"当前运行的宿主半体还是旧版本，没有 /open-directory 路由；重启 DSH 后「打开目录」才可用（HTTP " +
+									text(result.status) +
+									"）。",
+							);
+							return;
 						}
+						setError(result.payload.error ? text(result.payload.error) : "无法打开目录（HTTP " + text(result.status) + "）");
 					},
 					(reason) => setError(String((reason && reason.message) || reason)),
 				);
@@ -574,7 +586,7 @@ window.__ModuleLoader__.load({
 								disabled: busy,
 								onClick: manual ? makePlan : startMigration,
 							},
-							busy ? "处理中…" : manual ? "计划" : "开始迁移",
+							busy ? "处理中…" : manual ? "生成计划" : "开始迁移",
 						),
 						react.createElement("button", { type: "button", className: "dwsm-btn", disabled: busy, onClick: refresh }, "刷新状态"),
 					),
@@ -762,55 +774,29 @@ window.__ModuleLoader__.load({
 			// staged manual runs, collapsed into one row
 			if (state && Array.isArray(state.runs)) {
 				const runs = state.runs.slice().reverse();
-				const rows = [
-					react.createElement(
-						"div",
-						{ className: "dwsm-sub", key: "t" },
-						"备份目录：" + text(state.backupRoot || "（默认）"),
-					),
-				];
+				const rows = [];
 				if (runs.length === 0) {
-					rows.push(react.createElement("div", { className: "dwsm-sub", key: "none" }, "还没有暂存记录。勾选「手动迁移」后点「计划」。"));
+					rows.push(react.createElement("div", { className: "dwsm-sub", key: "none" }, "还没有暂存记录。勾选「手动迁移」后点「生成计划」。"));
 				}
 				for (const run of runs) {
+					// One line per staged run: where it goes, and the way into its directory. The
+					// runner inside is always 1-apply-migration.cmd, so the path adds nothing the
+					// button does not already give; the verify step is the second script, run after
+					// DSH is down, so a button for it here cannot be used at that point anyway.
 					rows.push(
 						react.createElement(
 							"div",
 							{ className: "dwsm-item", key: run.dir },
+							react.createElement("div", { className: "dwsm-mono" }, text(run.from) + "  ->  " + text(run.to)),
 							react.createElement(
-								"div",
-								null,
-								react.createElement("div", { className: "dwsm-mono" }, text(run.from) + "  ->  " + text(run.to)),
-								react.createElement(
-									"div",
-									{ className: "dwsm-sub" },
-									"会话 " + text(run.sessions) + "   ·   " + (run.report ? "报告：" + text(run.report.status) : "尚未执行"),
-								),
-								react.createElement("div", { className: "dwsm-mono" }, "退出 DSH 后执行：" + text(run.applyCmd || "")),
-							),
-							react.createElement(
-								"div",
-								{ className: "dwsm-row" },
-								react.createElement(
-									"button",
-									{
-										type: "button",
-										className: "dwsm-btn",
-										disabled: busy,
-										onClick: () => openDirectory(run.dir),
-									},
-									"打开目录",
-								),
-								react.createElement(
-									"button",
-									{
-										type: "button",
-										className: "dwsm-btn",
-										disabled: busy,
-										onClick: () => runVerify(run.planFile),
-									},
-									"verify",
-								),
+								"button",
+								{
+									type: "button",
+									className: "dwsm-btn",
+									disabled: busy,
+									onClick: () => openDirectory(run.dir),
+								},
+								"打开目录",
 							),
 						),
 					);
