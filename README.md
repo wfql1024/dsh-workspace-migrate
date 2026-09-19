@@ -143,16 +143,63 @@ if (plaintext.length === 0 || plaintext.indexOf(10) !== plaintext.length - 1)
 
 ## 安装 / 卸载
 
-```bash
-# 安装（会自动把本包追加进 dsh.profile.bundles）
-dsh plugin --profile web add <本目录路径>
+**前置条件**：DSH（Web 版）`0.1.5-rc.1` 上实测通过；Node ≥ 20。插件**没有发布到 npm**，
+按下面的方式从源码安装即可，**不需要** `npm install`（本包没有任何运行时依赖）。
 
-# 卸载
-dsh plugin --profile web remove dsh-workspace-migrate
+### 安装（三步）
+
+```bash
+# 1) 下载源码到任意目录（别放进 DSH 自己的目录里）
+git clone https://github.com/wfql1024/dsh-workspace-migrate.git ~/dsh-workspace-migrate
+
+# 2) 装进 web profile —— 这一条会自动把本包追加到 profile 的 dsh.profile.bundles 并建立链接
+dsh plugin --profile web add ~/dsh-workspace-migrate
+
+# 3) 完全退出 DSH 再重新启动（不是刷新页面）
 ```
 
-安装后**必须重启 DSH**：宿主插件树和浏览器模块图都是启动时合成的
-（`cordis-plugin-loader` 复用已加载模块的回调，且它的 `import()` 不带破缓存参数，改完的模块只有重启才会生效）。
+Windows PowerShell 里路径写成 `"$HOME\dsh-workspace-migrate"` 即可；路径带空格要加引号。
+
+**为什么必须重启**：宿主插件树和浏览器模块图都是启动时合成的
+（`cordis-plugin-loader` 复用已加载模块的回调，它的 `import()` 不带破缓存参数），
+所以改完/装完的模块只有重启才会生效——**客户端半体刷新页面就能更新，宿主半体（路由）只有重启才会更新**，
+两者版本不一致时插件会明确提示"宿主半体还是旧版本"，而不是丢一个 404 给你猜。
+
+### 确认装好了
+
+启动日志里会出现一行：
+
+```
+[dsh-workspace-migrate] mounted — 9/9 routes at /api/dsh-workspace-migrate, engine at <...>/lib/dsh-workspace-migrate.mjs
+```
+
+界面上：**左侧侧栏底部出现「⇄ 迁移」**，对话标题栏右侧出现「迁移工作区」，设置里多一页「工作区迁移」。
+
+### 升级
+
+```bash
+cd ~/dsh-workspace-migrate && git pull    # 然后重启 DSH
+```
+
+（插件的 `lib/dsh-workspace-migrate.mjs` 引擎是每次调用起子进程，升级后立即生效；
+`index.js` / `client.js` / `lib/live-move.mjs` 需要重启。）
+
+### 卸载
+
+```bash
+dsh plugin --profile web remove dsh-workspace-migrate   # 然后重启 DSH
+```
+
+卸载**不会**动你的会话、工作区或迁移备份；已经生成的 `migration-runs` / `migration-backups` 需要自己删。
+
+### 兼容性
+
+- 依赖 DSH 的私有面（`sessionPersistence.tracker.writers`、`workspaceRegistry.headers` /
+  `sessionPaths`、`sessions.flush`）。全部带 `typeof` 守卫：拿不到就**拒绝迁移运行中的会话**并说明原因，
+  而不是写坏数据。
+- 只提供 web 平台半体（`dsh.client.platform: "web"`）。
+- 没在这个 DSH 版本上验证过的组合，建议先用**只读预检**（面板上「开始迁移」的检查阶段、或
+  `workspace_migrate` 工具的 `live` + `dryRun`）看一遍再决定。
 
 ---
 
