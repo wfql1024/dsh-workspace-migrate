@@ -146,24 +146,57 @@ if (plaintext.length === 0 || plaintext.indexOf(10) !== plaintext.length - 1)
 **前置条件**：DSH（Web 版）`0.1.5-rc.1` 上实测通过；Node ≥ 20。插件**没有发布到 npm**，
 按下面的方式从源码安装即可，**不需要** `npm install`（本包没有任何运行时依赖）。
 
-### 安装（三步）
+`dsh plugin --profile web <参数>` 就是把参数交给 profile 目录里的 **pnpm**，所以两条路线都只是 pnpm 的依赖写法：
 
-```bash
-# 1) 下载源码到任意目录（别放进 DSH 自己的目录里）
-git clone https://github.com/wfql1024/dsh-workspace-migrate.git ~/dsh-workspace-migrate
+| 路线 | 命令 | 装完是什么 |
+|---|---|---|
+| **A. 直接吃 GitHub** | `dsh plugin --profile web add github:wfql1024/dsh-workspace-migrate` | node_modules 里一份拷贝，最省事 |
+| **B. 先克隆再装** | `git clone … <目录>` + `dsh plugin --profile web add <目录>` | `link:` 到你的克隆，能 `git pull` 升级 |
 
-# 2) 装进 web profile —— 这一条会自动把本包追加到 profile 的 dsh.profile.bundles 并建立链接
-dsh plugin --profile web add ~/dsh-workspace-migrate
+两条装完都**必须完全退出 DSH 再启动**（不是刷新页面）。
 
-# 3) 完全退出 DSH 再重新启动（不是刷新页面）
+### 路线 A：直接装（一条命令）
+
+```cmd
+dsh plugin --profile web add github:wfql1024/dsh-workspace-migrate
 ```
 
-Windows PowerShell 里路径写成 `"$HOME\dsh-workspace-migrate"` 即可；路径带空格要加引号。
+### 路线 B：克隆后安装（便于 `git pull` 升级）
+
+`~` 只在 bash / Git Bash 里有意义。**cmd.exe 不会展开 `~`**，所以下面一律用绝对路径：
+
+```cmd
+:: cmd.exe
+git clone https://github.com/wfql1024/dsh-workspace-migrate.git "%USERPROFILE%\dsh-workspace-migrate"
+dsh plugin --profile web add "%USERPROFILE%\dsh-workspace-migrate"
+```
+
+```powershell
+# PowerShell
+git clone https://github.com/wfql1024/dsh-workspace-migrate.git "$HOME\dsh-workspace-migrate"
+dsh plugin --profile web add "$HOME\dsh-workspace-migrate"
+```
+
+```bash
+# bash / Git Bash
+git clone https://github.com/wfql1024/dsh-workspace-migrate.git ~/dsh-workspace-migrate
+dsh plugin --profile web add ~/dsh-workspace-migrate
+```
 
 **为什么必须重启**：宿主插件树和浏览器模块图都是启动时合成的
 （`cordis-plugin-loader` 复用已加载模块的回调，它的 `import()` 不带破缓存参数），
 所以改完/装完的模块只有重启才会生效——**客户端半体刷新页面就能更新，宿主半体（路由）只有重启才会更新**，
 两者版本不一致时插件会明确提示"宿主半体还是旧版本"，而不是丢一个 404 给你猜。
+
+### 装不上时先看这里
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| `Command failed with exit code 128: git ls-remote git+ssh://git@github.com/~/dsh-workspace-migrate.git` / `is not a valid repository name` | 你在 **cmd.exe** 里用了 `~/…`。cmd 不展开 `~`，pnpm 于是把 `~/dsh-workspace-migrate` 当成 GitHub 的 `owner/repo` 去解析。改用绝对路径（见路线 B），或直接用路线 A |
+| 装完界面没变化 | 没重启 DSH。宿主插件树是启动时合成的 |
+| 日志里 `could not register /api/…` | 有另一个插件占了同名路由；插件会跳过那一条并继续挂载，把日志贴出来即可 |
+| 按钮点了没反应、或用旧版行为 | 客户端半体刷新页面就更新，**宿主半体只有重启才更新**；两者不一致时对话框会直接说明 |
+| `dsh plugin --profile web remove` 之后 `node_modules` 里还有目录 | pnpm 会留下链接本身。删链接要用 `cmd /c rmdir <路径>`，**不要**用 `Remove-Item -Recurse`（后者可能把链接指向的真实目录内容一起删掉） |
 
 ### 确认装好了
 
@@ -177,9 +210,8 @@ Windows PowerShell 里路径写成 `"$HOME\dsh-workspace-migrate"` 即可；路�
 
 ### 升级
 
-```bash
-cd ~/dsh-workspace-migrate && git pull    # 然后重启 DSH
-```
+- 路线 A：重新执行一次 `add`（会取 GitHub 上的最新提交），然后重启 DSH。
+- 路线 B：`cd <你的克隆目录> && git pull`，然后重启 DSH。
 
 （插件的 `lib/dsh-workspace-migrate.mjs` 引擎是每次调用起子进程，升级后立即生效；
 `index.js` / `client.js` / `lib/live-move.mjs` 需要重启。）
