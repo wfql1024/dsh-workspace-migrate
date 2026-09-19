@@ -202,7 +202,7 @@ function fakeEntity(id, titleValue, entityPathValue, sessionIds, log, host) {
 }
 
 /** A fake workspaceRegistry over a real synthetic home. */
-function fakeRegistry(home, { log = [], failAttach = false, onAttachFail = undefined, indexMaps = true, seedHeaderCache = true } = {}) {
+function fakeRegistry(home, { log = [], failAttach = false, onAttachFail = undefined, indexMaps = true, seedHeaderCache = true, extraDestinationClaim = false } = {}) {
   const headers = new Map()
   const sessionPaths = new Map()
   const invalid = new Set()
@@ -222,6 +222,12 @@ function fakeRegistry(home, { log = [], failAttach = false, onAttachFail = undef
     rememberSessionPath: (sessionId, cwd) => sessionPaths.set(sessionId, cwd),
   }
   const entities = [fakeEntity(home.workspaceId, 'Demo', home.from, Object.keys(home.before), log, host)]
+  // Two records claiming the destination path: the state DSH refuses to boot on, and the one a
+  // live move must not paper over by picking whichever record it happens to find first.
+  if (extraDestinationClaim === true) {
+    entities.push(fakeEntity('id-dup-1', 'Demo', home.to, [], log, host))
+    entities.push(fakeEntity('id-dup-2', 'Demo', home.to, [], log, host))
+  }
   const registry = {
     list: () => [...entities],
     get: (id) => entities.find((entity) => entity.id === id),
@@ -807,6 +813,26 @@ console.log('\n[17] a live session with several generation logs moves them all')
     ok(`${name}: frames after 0 are byte-identical`, frames.length === beforeFrames.length && frames.slice(1).every((f, i) => f.equals(beforeFrames[i + 1])))
     ok(`${name}: the header cwd is the new path`, zlib.zstdDecompressSync(frames[0]).toString('utf8').includes(home.to.replace(/\\/g, '\\\\')))
   }
+  fs.rmSync(home.root, { recursive: true, force: true })
+}
+
+// ── a path claimed by two records is refused, not papered over ──────────────
+//
+// Found on a real host: a manual apply re-pointed a record onto a path an empty leftover
+// record already claimed, and DSH could not boot afterwards. `create()` is idempotent per
+// path, so the live path would silently pick one of the two and leave the other in place.
+console.log('\n[18] two records claiming the destination is refused')
+{
+  const home = makeHome('claim', ['session-1'])
+  const registry = fakeRegistry(home, { extraDestinationClaim: true })
+  const inspect = await inspectLiveMove(fakeServices({ registry }), { fromPath: home.from, toPath: home.to })
+  ok('the precheck refuses', inspect.ok === false, JSON.stringify(inspect.blockers))
+  ok('it names the reason', /claimed by 2 workspace records/.test(inspect.blockers.join(' ')), JSON.stringify(inspect.blockers))
+  ok('it says what to do', /delete the extra one in the sidebar/.test(inspect.blockers.join(' ')), JSON.stringify(inspect.blockers))
+
+  const move = await withHome(home, () => liveMoveSessions(fakeServices({ registry }), { fromPath: home.from, toPath: home.to }))
+  ok('the move itself is refused too', move.ok === false && move.stage === 'precondition', JSON.stringify(move.stage))
+  ok('nothing was touched', fs.existsSync(path.join(home.oldKeyDir, 'session-1')) && registry.entities.length === 3, JSON.stringify(registry.entities.map((entity) => entity.id)))
   fs.rmSync(home.root, { recursive: true, force: true })
 }
 

@@ -134,6 +134,52 @@ note: every session is running, so the spawned engine was not used at all
 **运行中会话的 v3 日志在迁移后 3 分 43 秒仍有写入**（13:43:12 迁移 → 13:46:55 追加）——
 writer 确实被重定向到了新文件。
 
+### 3.4 同一路径被两条工作区记录声明：让 DSH 起不来（真机上第三次翻车）
+
+现象：用户跑完一次**手动迁移**（`Mine\JhiFengMultiChat → My\JhiFengMultiChat`），之后 `dsh web` 直接启动失败：
+
+```
+workspace domain is inconsistent: path 'E:\SpaceDev\Projects\My\JhiFengMultiChat' is claimed by
+both workspace '03d2457c-…' and workspace '224b28fb-…'
+```
+
+真实时间线（用 `migration-runs/live-*.json`、`migration-backups/*`、`report.json` 和文件时间戳复原）：
+
+1. 11:16 一次**不停机**迁移把 `My → Mine`：新建记录 `224b28fb`（Mine，挂着 2 条会话），
+   源记录 `03d2457c` 被留下、变成 My 上的空记录（这是文档里写明的"旧记录自己删"行为）。
+2. 11:20 用户又生成一次**手动**计划，方向是 `Mine → My`。计划里的 `workspace.json` 补丁
+   把 `224b28fb` 的 path 从 Mine 改写成 My —— 但 My 已经被 `03d2457c` 声明着。
+3. 11:21 用户没退 DSH 就跑了 `1-apply-migration.cmd`：补丁生效 → **两条记录声明同一个 My** → DSH 起不来。
+4. 之后还活着的那个 DSH 进程把它内存里的状态回写（path 又变回 Mine），于是"重复声明"消失了，
+   但注册表变成**路径与会话错位**：`224b28fb` 指向 Mine（空目录）却挂着 cwd 已经是 My 的两条会话。
+
+修复分三处：
+
+- **计划阶段**（`buildPlan`）：目标路径已被声明时 —— 占用者是**空**记录（就是上一次搬迁留下的壳）→
+  连补丁一起计划删除它（`metadata.removals`，apply 时删记录并同步 `global.workspaceIds`）；
+  占用者**还有会话** → 直接报错拒绝，让用户自己决定怎么合。源路径若已被两条记录声明，同样拒绝。
+- **不停机路径**（`inspectLiveMove`）：`registry.create()` 对同一路径是幂等的，所以它不会制造重复声明，
+  但会**静默挑一条**、留下另一条 —— 因此源/目标任一被多条记录声明就直接拒绝，并在提示里点名记录 id。
+- **verify**：把"一条路径只能被一条记录声明"作为 DSH 的启动不变量加入校验，
+  并核对计划里的每个 removal 是否真的生效。这个不变量以前完全没查，正是这次翻车的直接原因。
+
+数据修复没有直接编辑 `workspace.json`：那个文件是 registry 的内存投影，运行中的 DSH 会把它盖回去
+（上面第 4 步就是证据）。改用一个临时动态 Host 插件，通过 `detachSession`/`attachSession`/`delete`
+把会话并到 `03d2457c`、删掉 `224b28fb`，让 **DSH 自己**写出正确文件；随后确认
+`workspace.json` 只剩一条 My 记录、挂着 2 条会话，并且没有任何路径被声明两次。
+
+### 3.5 停机脚本必须自己检查 DSH 是否退出
+
+`preflightForApply` 一直有"检测到 DSH 就拒绝"的逻辑，但它是 **fail-open** 的：
+`detectDshProcesses()` 返回 `checked:false`（WMI/PowerShell 探测失败）时 `matches` 为空，
+于是照常执行——上面那 11:21 的手动 apply 就是这么过去的：备份建了、补丁打了，
+用户以为"脚本自己会拦"。现在：
+
+- 探测失败重试一次；仍失败 → **拒绝执行**（"无法确认 DSH 已退出"），要求显式 `--allow-running`。
+- 生成的 `1-apply-migration.cmd` / `3-rollback.cmd` 里加了一个前置步骤
+  `dsh-workspace-migrate.mjs check-quiescent`：有 DSH 就打印命中的进程并 `exit /b 1`，
+  在动手之前就把人挡下来（`2-verify.cmd` 只读，不加）。
+
 ---
 
 ## 四、关键设计决定
@@ -277,6 +323,8 @@ if (prototype !== Object.prototype && prototype !== null)
 | 出错留下半成品 | 文件层有备份+自动回滚；内存层有反向 attach/detach 与 header 还原；报告落盘 |
 | `workspace.json` 双写 | 引擎带 `--skip-workspace-json`，只让 registry 写 |
 | 运行中会话的投影缓存来不及 checkpoint | 交给它自己的 fail-soft 自愈（实测确认），不硬写 |
+| **同一路径被两条工作区记录声明** | 计划阶段就查：目标已被**空**记录占用 → 连补丁一起删掉那条；目标被**有会话**的记录占用 → 直接拒绝（合并两个工作区不是工具该替用户决定的事）。不停机路径同样预检（`create()` 对同一路径幂等，会静默挑一条留下另一条）。verify 也把"一条路径只能被一条记录声明"当作 DSH 的启动不变量来查 |
+| 停机脚本在 DSH 还开着的时候被执行 | `1-apply-migration.cmd` / `3-rollback.cmd` 先跑 `check-quiescent` 子命令，有 DSH 就打印原因并 `exit /b 1`；这个探测本身失败（`checked:false`）也算**不安全**，不再放行 |
 
 ---
 

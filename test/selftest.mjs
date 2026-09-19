@@ -101,7 +101,7 @@ function freshRoot(label) {
 }
 
 // ── scenario construction ────────────────────────────────────────────────────
-function scenario(root, { sessions, foreignSession = false, duplicate = false, locks = false }) {
+function scenario(root, { sessions, foreignSession = false, duplicate = false, locks = false, destinationClaim = undefined }) {
   const dshHome = path.join(root, 'dsh-home')
   const sessionsRoot = path.join(dshHome, 'sessions')
   const storagesRoot = path.join(dshHome, 'storages')
@@ -170,9 +170,24 @@ function scenario(root, { sessions, foreignSession = false, duplicate = false, l
       updatedAt: '2026-01-02T00:00:00.000Z',
     },
   }
+  const workspaceIds = [workspaceId]
+  // A second record claiming the destination path — the husk a previous move leaves behind, or
+  // a real second workspace. DSH refuses to boot when a path is claimed twice, so the plan has
+  // to deal with it either way.
+  if (destinationClaim !== undefined) {
+    const claimId = 'dddddddd-1111-2222-3333-444444444444'
+    workspaces[claimId] = {
+      path: to,
+      title: 'Claimed',
+      sessionIds: destinationClaim === 'occupied' ? [sessions[0]?.id ?? 'session-other'] : [],
+      createdAt: '2026-01-03T00:00:00.000Z',
+      updatedAt: '2026-01-03T00:00:00.000Z',
+    }
+    workspaceIds.unshift(claimId)
+  }
   const workspaceDoc = {
     unit: { name: 'workspace', version: 2 },
-    global: { initialized: true, workspaceIds: [workspaceId], archivedSessionIds: [] },
+    global: { initialized: true, workspaceIds, archivedSessionIds: [] },
     tables: { workspaces },
   }
   fs.writeFileSync(path.join(storagesRoot, 'workspace.json'), JSON.stringify(workspaceDoc, null, 2))
@@ -202,7 +217,7 @@ function scenario(root, { sessions, foreignSession = false, duplicate = false, l
     )
   }
 
-  return { root, dshHome, sessionsRoot, storagesRoot, from, to, oldKey, newKey, oldKeyDir, workspaces, workspaceId, built }
+  return { root, dshHome, sessionsRoot, storagesRoot, from, to, oldKey, newKey, oldKeyDir, workspaces, workspaceId, built, destinationClaimId: destinationClaim === undefined ? undefined : 'dddddddd-1111-2222-3333-444444444444' }
 }
 
 function framesOf(file) {
@@ -522,6 +537,75 @@ console.log('\n[Test H] a duplicate this migration is responsible for still fail
   const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
   ok('apply fails', apply.code === 1, `exit ${apply.code}`)
   ok('the failure names the two project keys', JSON.stringify(apply.json?.error ?? '').includes('two project keys'), apply.json?.error)
+}
+
+// ── Test I: the destination path must not end up claimed twice ─────────────
+//
+// Found on a real host: a manual apply re-pointed the source record onto a path an empty
+// leftover record already claimed, and DSH then refused to boot —
+// "path ... is claimed by both workspace A and B".
+console.log('\n[Test I] an empty record on the destination path is removed, not duplicated')
+{
+  const root = freshRoot('I')
+  const movedId = 'session-bbbbbbbb-1111-1111-1111-111111111111'
+  const env = scenario(root, { sessions: [{ id: movedId, versions: [3] }], destinationClaim: 'empty' })
+  const base = ['--dsh-home', env.dshHome, '--json']
+
+  const plan = run(['plan', '--from', env.from, '--to', env.to, '--project', 'keep', ...base])
+  ok('the plan is still ok', plan.json?.ok === true, JSON.stringify(plan.json?.errors))
+  ok('it plans to remove the empty record', (plan.json?.metadata.removals ?? []).length === 1, JSON.stringify(plan.json?.metadata.removals))
+  ok('it says why', (plan.json?.warnings ?? []).some((w) => /already claimed/.test(w)), JSON.stringify(plan.json?.warnings))
+
+  const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('apply exits 0', apply.code === 0, apply.json?.error ?? apply.stderr.trim())
+  const doc = JSON.parse(fs.readFileSync(path.join(env.storagesRoot, 'workspace.json'), 'utf8'))
+  const claiming = Object.entries(doc.tables.workspaces).filter(([, w]) => w.path === env.to)
+  ok('exactly one record claims the destination', claiming.length === 1, JSON.stringify(claiming.map(([id, w]) => `${id}:${w.path}`)))
+  ok('the surviving record is the migrated one', claiming[0]?.[0] === env.workspaceId, String(claiming[0]?.[0]))
+  ok('the empty record is gone from the order too', !doc.global.workspaceIds.includes(env.destinationClaimId), JSON.stringify(doc.global.workspaceIds))
+  const verify = run(['verify', '--plan', plan.json.stage.planFile, ...base])
+  ok('verify passes', verify.json?.ok === true, JSON.stringify(verify.json?.failures))
+  ok('verify checks the boot invariant', (verify.json?.checks ?? []).some((c) => c.name === 'no workspace path is claimed by two records'), JSON.stringify((verify.json?.checks ?? []).map((c) => c.name)))
+}
+
+// ── Test J: a destination claim that holds sessions is refused ─────────────
+console.log('\n[Test J] a populated destination claim is refused, not merged')
+{
+  const root = freshRoot('J')
+  const env = scenario(root, { sessions: [{ id: 'session-cccccccc-1111-1111-1111-111111111111', versions: [3] }], destinationClaim: 'occupied' })
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const plan = run(['plan', '--from', env.from, '--to', env.to, '--project', 'keep', ...base])
+  ok('the plan is refused', plan.json?.ok === false, JSON.stringify(plan.json?.errors))
+  ok('the refusal names the claiming record', JSON.stringify(plan.json?.errors ?? []).includes(env.destinationClaimId), JSON.stringify(plan.json?.errors))
+  ok('it explains that merging is not its call', JSON.stringify(plan.json?.errors ?? []).includes('merging two workspaces'), JSON.stringify(plan.json?.errors))
+  // The refused plan is still staged (so it can be inspected), but applying it must be blocked.
+  const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('applying the refused plan is blocked', apply.code === 1 && /plan is not ok/.test(`${apply.json?.error ?? ''}${apply.stderr ?? ''}`), `exit ${apply.code}: ${apply.json?.error ?? apply.stderr?.trim()}`)
+  const doc = JSON.parse(fs.readFileSync(path.join(env.storagesRoot, 'workspace.json'), 'utf8'))
+  ok('the store is untouched', Object.keys(doc.tables.workspaces).length === 2, JSON.stringify(Object.keys(doc.tables.workspaces)))
+}
+
+// ── Test K: the staged scripts refuse to run while DSH is up ───────────────
+console.log('\n[Test K] the staged scripts guard against a running DSH')
+{
+  const root = freshRoot('K')
+  const env = scenario(root, { sessions: [{ id: 'session-dddddddd-1111-1111-1111-111111111111', versions: [3] }] })
+  const base = ['--dsh-home', env.dshHome, '--json']
+  const plan = run(['plan', '--from', env.from, '--to', env.to, '--project', 'keep', ...base])
+  const applyCmd = fs.readFileSync(plan.json.stage.applyCmd, 'utf8')
+  const rollbackCmd = fs.readFileSync(plan.json.stage.rollbackCmd, 'utf8')
+  const verifyCmd = fs.readFileSync(plan.json.stage.verifyCmd, 'utf8')
+  ok('1-apply-migration.cmd checks for a running DSH first', applyCmd.includes('check-quiescent'), applyCmd)
+  ok('and it refuses with an explanation', /if errorlevel 1/.test(applyCmd) && /Quit DSH completely/.test(applyCmd), applyCmd)
+  ok('the check runs before the migration', applyCmd.indexOf('check-quiescent') < applyCmd.indexOf('apply --plan'), 'the guard must come first')
+  ok('the rollback script is guarded too', rollbackCmd.includes('check-quiescent'), rollbackCmd)
+  ok('the read-only verify script needs no guard', !verifyCmd.includes('check-quiescent'), verifyCmd)
+
+  // The command itself: it must answer, and it must never claim safety without being sure.
+  const guard = run(['check-quiescent', ...base])
+  ok('check-quiescent answers with 0 or 1', guard.code === 0 || guard.code === 1, `exit ${guard.code}`)
+  const said = `${guard.stdout}${guard.stderr}`
+  ok('it says which way it decided', /safe to continue|still running|could not determine/.test(said), said.trim())
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

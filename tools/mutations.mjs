@@ -86,6 +86,22 @@ export const MUTATIONS = [
     to: '        void empty /* MUTATION: empty orphans counted as sessions */',
   },
   {
+    name: 'destination-claim-ignored',
+    file: 'lib/dsh-workspace-migrate.mjs',
+    suite: 'test/selftest.mjs',
+    breaks: 'the plan re-points a record onto a path another record already claims, leaving DSH unable to boot',
+    from: '    if (!samePath(from, to) && destinationClaims.length > 0) {',
+    to: '    if (false && !samePath(from, to) && destinationClaims.length > 0) { /* MUTATION: destination claim ignored */',
+  },
+  {
+    name: 'staged-guard-dropped',
+    file: 'lib/dsh-workspace-migrate.mjs',
+    suite: 'test/selftest.mjs',
+    breaks: 'the staged apply/rollback scripts no longer check that DSH is stopped',
+    from: '      ...(guarded ? [guard] : []),',
+    to: '      ...(false ? [guard] : []), /* MUTATION: staged scripts lose the DSH guard */',
+  },
+  {
     name: 'picker-not-preselected',
     file: 'client.js',
     suite: 'test/clienttest.mjs',
