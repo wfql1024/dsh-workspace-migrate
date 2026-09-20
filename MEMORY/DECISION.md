@@ -89,6 +89,15 @@
   - 只留一个「**开始迁移**」：只读检查先跑、通过才动手，不通过就零写入并在 `Check` 行给出原因；
     "不停机"不进按钮文案（它是标准做法，不是高级选项）。
   - 勾选「手动迁移」后同一个按钮变成「生成计划」（去掉模式开关那一行）。
+  - **输入框任何改动都作废上一次检查结论**：`from` / `to` / 「一起搬项目目录」任一变化都会清掉
+    `liveInspect` 与 `liveResult`（单按钮把检查和执行连在一起之后，这条更关键 ——
+    否则用户可能对着"某个旧输入"的结论点了执行）。测试断言初始渲染里没有执行按钮，
+    并断言改动输入后上一轮结论消失。
+  - **对话标题栏那个入口要预选当前对话所在的工作区**：该座位是 `session` 作用域的，
+    props 里有 `sessionId`；面板用 `/session` 把它解析成该会话的 `cwd` 填进「从」。
+    只有对话框实例预选，**设置页实例不预选**（否则打开设置页会悄悄改掉用户表单里的值）。
+    下拉框的选中值是**用规范化比较算出来的**（`samePathText`），不是一个常量 —— 常见坑是
+    "受控 `<select>` 给了固定 value，于是无论选什么都弹回占位项"。
   - 结果每个阶段**一行摘要**（`Check` / `Migrate` / `Plan` / `Verify` / `暂存的手动迁移`），带颜色状态标签，
     细节放在 `hidden` 的正文里；**失败默认展开**，成功/计划默认折叠。
   - 折叠默认值写成渲染期判断（`rowOpen(key, defaultOpen)`）而不是点击处理函数里的状态写入 ——
@@ -96,6 +105,8 @@
 - **理由**：结果铺一屏文字时，用户分不清"提示"和"错误"（早期的 note 全是平铺句子）。
 - **代价**：行头要用 `div[role=button]`（行里还要放按钮，按钮套按钮是非法 HTML）；
   需要维护一份 `PANEL_HOOKS` 顺序给客户端测试做状态种子。
+- **守它的是**：`clienttest` 的 `[4]`/`[7]`/`[8]` 三段 —— 文案、折叠、预选都有断言；
+  变异 `picker-not-preselected` 专门打断"预选"逻辑。
 
 ## D11 「打开目录」走宿主路由，并限制在 migration-runs 下
 
@@ -134,3 +145,41 @@
     没被抓住的变异会让 `npm run test:mutations` 退出码非 0。
 - **理由**：早期宽松的假服务让两个只有真机才暴露的 bug（`flush(undefined)`、空目录残留）全部漏过。
 - **代价**：写测试比写功能慢；但真机翻车的成本更高（已经翻过三次）。
+
+**基线快照（2026-09-19，仅供对照；权威清单永远在 `tools/mutations.mjs` 和测试文件里）**：
+
+| 套件 | 断言数 | 守什么 |
+|---|---|---|
+| `test/hosttest.mjs` | 73 | 宿主半体挂载、真实路由处理器、`/open-directory` 的边界、工具定义 |
+| `test/clienttest.mjs` | 97 | 浏览器半体渲染、四类状态种子、信号前缀、折叠行、手动模式文案 |
+| `test/livetest.mjs` | 153 | 不停机编排：预检、四层、撤销栈、运行中会话、多 generation、重复声明 |
+| `test/selftest.mjs` | 132 | 引擎沙箱：计划→执行→回滚、帧逐字节、元数据补丁、停机脚本守卫 |
+
+13 个变异（名字即 `tools/mutations.mjs` 里的 key）：`writer-rebind` / `route-to-engine` / `leave-old-dir` /
+`plain-header-copy` / `note-markers-dropped` / `companions-left-behind` / `undo-session-header` /
+`undo-writer-header` / `report-not-written` / `orphan-blocks-migration` / `destination-claim-ignored` /
+`staged-guard-dropped` / `picker-not-preselected`。跑一次约 10 分钟（见 [`TODOS.md`](TODOS.md)）。
+
+## D15 入口一律加法式，绝不注册 `sidebar.workspaces`
+
+- **背景**：DSH 的插槽分两类。`sidebar.footer.action` / `conversation.session.header.actions` /
+  `settings.section` / `shell.overlay` 是**加法式**（`replaceRisk: none`，多个插件可以共存）；
+  而 `sidebar.workspaces` 是 **`single` 且 `shadows-shipped-ui`** —— 注册它等于**替换整个原生会话列表**。
+- **决定**：只注册上面那三个加法式入口；`sidebar.workspaces` **永不**注册。
+- **理由**：注册它会顶掉用户的原生会话列表，并且和已经装着同一插槽的其它插件（例如 better-sidebar 类）相互覆盖 ——
+  一个"搬家工具"没有理由接管会话列表。
+- **代价**：搬完的旧工作区记录没法在插件里"就地清理"，只能让用户右键删（见 D13）。
+- **守它的是**：`clienttest`「sidebar.workspaces is never registered (that single slot would shadow the shipped sidebar)」，
+  以及"四个入口都是加法式注册"的断言（`test/clienttest.mjs`）。
+
+## 已废止的旧设计（保留记录，避免重新发明）
+
+> 下面这些**曾经是对的**，后来被更好的做法取代。留着是为了以后有人想"简化"时先看到代价。
+
+| 旧设计 | 为什么废止 | 取代它的 |
+|---|---|---|
+| 「迁移必须在 DSH 完全退出后执行」——第一版整个引擎都建立在这个前提上 | 不停机路线在真机上跑通后，停机不再是唯一安全方式；而且对话标题栏那个按钮的存在意义就是"正在对话也能迁" | D1（文件层单份实现）+ D2（无 `await` 同步段）+ D6（四层撤销栈）；停机退化为**兜底**模式（D9 让脚本自己拦） |
+| 「运行中的会话一律拒绝」——第一版的前置检查直接硬拒 | 用户明确否掉：那等于把「迁移工作区」按钮做成摆设。真机验证 `tracker.writers` + `writer.header` 可写之后，运行中会话可以安全迁 | D2 + D3 |
+| 「执行按钮只在预检通过后才出现」 | 两个按钮 = 用户要先点"预检"再点"执行"，多余一步；改成单按钮内部先检查、不通过就零写入 | D10（单按钮 + `Check` 行给原因） |
+| 「方式」行用两个按钮切换"不停机 / 停机计划" | 不停机是标准做法，不该看起来像高级选项 | D10（一个复选框「手动迁移」，按钮文案在「开始迁移」/「生成计划」之间切换） |
+

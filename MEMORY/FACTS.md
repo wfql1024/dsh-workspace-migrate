@@ -40,6 +40,7 @@
 | 工件路径 | `<DSH_HOME>/sessions/<projectKey(cwd)>/<sessionId>/session[.vN].jsonl.zstd` | 引擎按同一套 projectKey 规则推导 |
 | **一个会话目录可以有多代日志** | 实测同一目录下同时有 `session.jsonl.zstd`（v0，7.1 MB / 17324 帧）与 `session.v3.jsonl.zstd`（v3，2.2 MB / 208 帧）；`persistence.locate()` 给的是 writer 正在写的那一代 | **搬迁必须逐代搬走**，只搬一代会让同一个 id 留在旧 projectKey，DSH 直接拒绝（DEV_LOGS 2026-09-18） |
 | frame 0 不变量 | `dsh-session-persistence-jsonl/lib/index.js:2185`：`plaintext.indexOf(10) === plaintext.length - 1`，即**第 0 帧解压后必须恰好是一行以 `\n` 结尾的 header** | 只重压第 0 帧，其余帧逐字节原样拷回 |
+| **帧切分方式** | 生产代码按 **RFC 8878 §3** 解析帧头/块头算长度（`lib/zstd-frames.mjs:14`），**不扫魔数**：zstd 魔数 `28 B5 2F FD` 可能刚好出现在压缩数据里，扫它会把一个帧切成两半 | 这是"帧数不变、后续帧逐字节"能成立的前提；测试里的 `splitFramesByScan()` **故意**用魔数扫描，作为**独立**的第二实现和它交叉校验（两边算出同一组帧才算过） |
 | session id 唯一性 | `dsh-session-persistence-jsonl/lib/index.js:2878` `listArtifacts()`：**遍历整个 sessions 根目录**，同 id 出现在两个 projectKey 就 `throw duplicate JSONL session id ...` | 任何"旧目录残留一份"都会在 `attachSession` 缓存 miss 时炸；这是 D8/多代搬迁的直接依据 |
 | 文件命名 | v0 是 `session.jsonl.zstd`，vN 是 `session.vN.jsonl.zstd`；文件名版本与 header 里的版本必须一致 | 引擎会核对，不一致拒绝 |
 
@@ -85,3 +86,16 @@
 | `~` 在 cmd.exe | **不展开**。`dsh plugin --profile web add ~/x` 会被 pnpm 当成 GitHub 的 `owner/repo`，报 `is not a valid repository name`（2026-09-19 实测） |
 | 删 junction | 用 `cmd /c rmdir <链接>`；`Remove-Item -Recurse` 可能连链接指向的真实目录内容一起删 |
 | `Get-CimInstance` 探测 DSH 进程 | 偶发失败（超时/无输出）。失败时**不能**当作"没有 DSH 在跑"（D9 就是为此） |
+
+## 8. 插槽与注册（客户端半体）
+
+| 事实 | 值 | 影响 |
+|---|---|---|
+| 本插件用到的四个座位 | `sidebar.footer.action`、`conversation.session.header.actions`、`settings.section`、`shell.overlay` | 都是**加法式**（`replaceRisk: none`）：多个插件可共存，不遮蔽原生 UI |
+| `conversation.session.header.actions` 的作用域 | `session` 作用域，标准 props 里带 `sessionId` | 对话标题栏那个入口能预选当前对话的工作区（D10） |
+| **`sidebar.workspaces`** | 是 **`single`** 且 `shadows-shipped-ui` —— 注册它等于**替换整个原生会话列表** | **永不注册它**（D15）：一个搬家工具没理由接管会话列表，而且会和其它占了同一插槽的插件互相覆盖 |
+| 注册被拒时的行为 | 单条注册失败会被 catch 并打日志（`could not register <path> / <slot>: …`），**其余注册继续挂载** | 启动日志里出现一条 `could not register` 不等于插件没装上 |
+
+守这些事实的断言在 `test/clienttest.mjs`：四个座位都注册、每个注册都被 fiber effect 拥有、
+`sidebar.workspaces is never registered (that single slot would shadow the shipped sidebar)`、
+以及"设置页实例不做会话预选"。
