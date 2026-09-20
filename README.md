@@ -1,180 +1,83 @@
-# dsh-workspace-migrate
+# dsh-workspace-migrate — DSH 工作区迁移
 
-DSH（DeepSeek Harness）插件：把一个工作区**整体搬到新路径**，历史会话跟过去，**包括你正在对话的那一条**，全程不用退出 DSH。
+[![GitHub](https://img.shields.io/badge/GitHub-仓库-blue)](https://github.com/wfql1024/dsh-workspace-migrate)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![DSH](https://img.shields.io/badge/DSH-0.1.5--rc.1-blue)](#兼容性)
 
-> Move a DSH workspace — its project directory, its registration and every session, including the
-> conversation you are chatting in — to a new path without stopping the harness.
+用于在 DeepSeek Harness（DSH）Web 中**把一个工作区整体搬到新路径**：项目本体目录、工作区注册记录、
+全部历史会话一起迁走 —— **包括你正在对话的那一条**，全程不用退出 DSH。欢迎至 GitHub 提意见。
 
-一次完整的迁移做四件事，缺一不可：
+## 功能
 
-1. 搬项目本体目录（`D:\...` → `E:\...`）
-2. 在新路径注册（或复用）工作区
-3. 改写每条会话日志 header 里的 `cwd`，并把会话工件搬到新 `projectKey` 下
-4. 同步内存态：把会话 attach 到新工作区、重定向运行中会话的写句柄
+- **不停机迁移（默认）**：搬项目目录 + 改会话日志 header 里的 `cwd` + 把会话工件挪到新 `projectKey` +
+  同步工作区注册表与内存态。运行中的会话（含当前对话）通过**重定向它的写句柄**实现，不会中断对话。
+- **多代日志一起搬**：DSH 升级日志格式时会在同一会话目录里留下 `session.jsonl.zstd` 与 `session.v3.jsonl.zstd`
+  两代文件，插件逐代搬迁 —— 只搬一代会让会话 id 同时出现在两个 projectKey，DSH 会直接拒绝。
+- **帧安全**：只重压每条日志的**第 0 帧**（header），其余 zstd 帧**逐字节原样拷回**，
+  保持 DSH 启动时断言的不变量（第 0 帧必须恰好是一行）。
+- **失败自动回滚**：项目目录、工作区注册、会话工件、内存注册表四层按依赖顺序执行，
+  任何一层失败都从新到旧回滚（工件按字节还原、刚注册的工作区被撤销）。
+- **每次迁移都留账**：成功/失败都写一份报告；停机模式另有整目录备份。
+- **停机计划模式（可选）**：勾选「手动迁移」后只生成脚本，退出 DSH 自己执行 —— 兜底路线。
+- **模型工具**：`workspace_migrate`（`live` / `plan` / `status` / `verify` / `apply`），
+  可以直接对 Agent 说"把 X 工作区迁到 Y"。
 
-做完之后，会话历史完整、仍然归属目标工作区，而不是掉进"未分组"。
+## UI 入口
 
----
+- **左侧侧栏底部**：「⇄ 迁移」，打开迁移对话框。
+- **对话标题栏右侧**：「迁移工作区」，**预选当前对话所在的工作区** —— 正在对话也可以迁。
+- **设置 → 工作区迁移**：同一个面板，随时进来看看。
+- **模态框里**：`Check` / `Migrate` / `Plan` / `Verify` / `暂存的手动迁移` 各占一行摘要，
+  点一下展开细节；失败会自动展开。暂存项旁边的「i」按钮写着手动流程的用法。
 
-## 界面入口
+## 用法
 
-| 位置 | 说明 |
-|---|---|
-| **左侧侧栏底部** | 「⇄ 迁移」按钮（「设置」旁边），点击弹出迁移对话框 |
-| **对话标题栏右侧** | 「迁移工作区」按钮，**预选当前对话所在的工作区** —— 正在对话也可以迁 |
-| **设置 → 工作区迁移** | 同一个面板，方便随时进来看看 |
+### 不停机迁移（默认）
 
-三个入口都是**加法式**注册（`replaceRisk: none`），不会遮蔽任何原生 UI。
-特别地，**不会**注册 `sidebar.workspaces` —— 那是个 `single` 插槽，注册它会替换整个原生会话列表，并和 `dsh-better-sidebar` 冲突。
+1. 选工作区（或直接填「从」），填「到」。
+2. 目标目录还不存在？勾上「帮我把项目目录一起搬过去」。
+3. 点 **「开始迁移」**。它会**先做只读检查**，检查不通过就一行不改，并在 `Check` 行告诉你为什么；
+   通过则继续完成迁移。
+4. 结果看 `Migrate` 行（`[√] 成功` / `[×] 失败`）；失败会展开细节，并且**文件已还原**。
 
-界面只有一个动作按钮：**「开始迁移」**。它先做只读检查、检查通过才真正动手 —— 两步合成一步，检查不通过时不会有任何写入，
-并在 `Check` 那一行告诉你为什么。勾选 **「手动迁移」** 后同一个按钮变成 **「生成计划」**，只生成脚本供你退出 DSH 后执行。
+> 搬完之后**旧的空工作区记录会留在侧栏**（`sessionIds` 为空），这是有意为之（DSH 没有改工作区 path 的公开 API），
+> 右键删掉即可；项目里所有会话都已属于新工作区。
 
-结果不再铺一屏文字，而是每条一行摘要（`Check` / `Migrate` / `Plan` / `Verify` / `暂存的手动迁移`），
-带颜色状态标签（成功 / 失败 / 可执行 / 被阻止），点一下才展开细节；**失败会自动展开**，不需要你再点。
+### 手动迁移（停机兜底）
 
-模型工具：`workspace_migrate`，动作 `live` / `plan` / `status` / `verify` / `apply`。
-可以直接对我说「把 X 工作区迁到 Y」，我会先跑只读预检再动手。
+1. 勾选 **「手动迁移」**，按钮变成 **「生成计划」**，点它。
+2. 结果是一行 `Plan`（点「打开目录」可直接跳到那个目录）。
+3. **完全退出 DSH**（Web 服务 + 所有会话进程）。
+4. 双击 `1-apply-migration.cmd` → `2-verify.cmd`（必须全 PASS）→ 出错则 `3-rollback.cmd`。
+5. 重新启动 DSH，确认工作区下仍挂着原来的会话。
 
-> 「打开目录」由宿主新增的 `/open-directory` 路由实现，且**只允许打开 `<DSH_HOME>/migration-runs` 下的目录**。
-> 如果你点它没反应：先看提示行 —— 客户端半体刷新页面就会更新，**宿主半体（路由）必须重启 DSH 才会更新**，
-> 两者版本不匹配时插件会直接告诉你"宿主半体还是旧版本"，而不是丢一个 404 给你猜。
+> `1-apply-migration.cmd` 和 `3-rollback.cmd` **会自己先确认 DSH 已经退出**：还探测到 DSH 进程就直接退出、不动任何文件。
+> 在 DSH 运行时执行迁移会丢改动（DSH 会把内存里的工作区状态回写，盖掉迁移结果）。
 
----
+## 安装
 
-## 两种模式
+插件**没有发布到 npm**，按下面任一方式从 GitHub 安装即可。**不需要** `npm install`（本包没有任何运行时依赖）。
 
-### 不停机迁移（`live`）—— 默认
+### 从 GitHub 安装（一条命令）
 
-原地完成，不需要退出 DSH，**运行中的会话（含当前对话）也能迁**：
-
-- 项目目录：`robocopy /E /MOVE`（失败不删源目录）
-- 会话工件：插件进程内搬迁 + 重压第 0 帧
-- 内存态：`detachSession` / `attachSession`，并重定向 live writer
-
-四层按依赖顺序执行，任何一层失败都会**从新到旧自动回滚**（项目目录会被搬回来、工件按字节还原、刚注册的工作区被撤销）。
-无论成功还是失败，都会在 `<DSH_HOME>/migration-runs/live-<时间戳>.json` 留下一份报告。
-
-### 手动迁移（勾选后走 `plan`）—— 保守路线
-
-生成一个自包含的运行目录，等 DSH 完全退出后双击执行。结果行里的 **「打开目录」** 按钮可以直接跳到那个目录；
-`暂存的手动迁移` 里每一条也只显示 `源 -> 目标` 加一个「打开目录」（脚本固定是 `1-apply-migration.cmd`，
-路径不用重复显示；`2-verify.cmd` 是退出 DSH 之后才跑的一步，放在这里点不到，所以不给按钮）：
-
-```
-<DSH_HOME>/migration-runs/<时间戳>-<项目名>/
-    1-apply-migration.cmd   ← 退出 DSH 后双击
-    2-verify.cmd            ← 必须全 PASS
-    3-rollback.cmd          ← 出问题就双击
-    plan.json
-    dsh-workspace-migrate.mjs
-    README.txt
-```
-
-备份写在 `<DSH_HOME>/migration-backups/<时间戳>/`，包含整个会话目录 + 每个被改动的 storage 文件 + manifest；任何一步失败会自动回滚并校验回滚结果。
-
-> **`1-apply-migration.cmd` 和 `3-rollback.cmd` 会先自己确认 DSH 已经退出**：只要还探测到 DSH 进程，
-> 脚本就打印命中的进程并直接退出，不会动任何文件。**在 DSH 还开着的时候跑迁移会丢改动** ——
-> DSH 会把内存里的工作区状态回写，盖掉迁移结果（这条路上真的翻过车）。
-> 如果进程探测本身失败，脚本同样拒绝执行而不是"当作已经退出"。
-
----
-
-## 运行中的会话是怎么迁的
-
-难点只有一句话：**会话日志是追加写流，文件在磁盘上搬家时，进程里那个写句柄还指着旧路径。**
-
-插件在 `sessionPersistence.tracker.writers` 里找到这条会话的写句柄（这是 DSH 私有面，全部带 `typeof` 守卫，缺失就明确报错而不是硬来），然后：
-
-1. `sessions.flush(session)`：先把缓冲事件落到**旧**工件里，旧文件是完整记录；
-2. 中间**一个 `await` 都没有**：重压第 0 帧 → 移动工件 → 用保留原型的对象改写 `writer.header`。
-   Node 单线程事件循环意味着无 `await` 的这段代码**不可能被追加写插入** —— 这比"再上一把锁"更强，
-   而且本版本根本没有 `persistence.coordinator` 可锁。
-3. 之后再更新内存 registry（`registry.headers` 缓存要先失效再 attach，见 `DESIGN-live-move.md`）。
-
-回滚同样处理：把 writer 和 Session 的 header 指回旧路径，工件搬回去。
-
-### 一个会话目录可能有好几代日志
-
-DSH 升级会话日志格式时会写新一代、把旧一代留作历史，所以一个会话目录里可能同时有
-`session.jsonl.zstd`（v0）和 `session.v3.jsonl.zstd`（v3）。搬迁必须**把每一代都搬走**：
-只搬 writer 正在写的那一代，旧 key 下就还留着一份，同一个 session id 出现在两个 projectKey，
-DSH 会直接拒绝加载（`duplicate JSONL session id ... appears in multiple project directories`）。
-所以不停机路径逐个 generation 处理，搬完还会检查旧目录有没有残留，有就报错回滚。
-
-### 为什么 header 要"保留原型"地重建
-
-`session.header` 是宿主 realm 里 `deepFreeze` 过的纯 JSON 记录，而插件代码跑在 Cordis 沙箱 realm。
-`Object.assign({}, header, { cwd })` 造出来的对象会带上**沙箱 realm** 的 `Object.prototype`，
-而 DSH 自己的校验明确拒绝这种形状：
-
-```js
-// dsh-session/lib/types/index.js:68-76
-if (prototype !== Object.prototype && prototype !== null)
-  throw new Error('session header is not a plain JSON record')
-```
-
-所以 `headerWithCwd()` 用 `Object.create(原 header 的原型)` 再拷贝字段，产出的 header 与宿主自己造的**无法区分**。
-这是拿真实运行中的会话实测出来的（写被接受、原型保持、`persistence.stat(id)` 仍可读、registry 仍能读到）。
-
----
-
-## 帧安全（最关键的一点）
-
-`session*.jsonl.zstd` 是**多帧** zstd 串联流。DSH 在启动时断言：
-
-```js
-// dsh-session-persistence-jsonl/lib/index.js:2185
-if (plaintext.length === 0 || plaintext.indexOf(10) !== plaintext.length - 1)
-  throw new Error("corrupt Zstandard session log: first frame is not exactly one header line")
-```
-
-即**第 0 帧解压后必须恰好是一行以 `\n` 结尾的 header**。
-
-因此本插件：
-
-- **只重压第 0 帧**，其余帧**逐字节原样拷回**
-- 帧切分按 RFC 8878 解析帧头/块头算长度，**不扫魔数**（压缩数据里偶然出现 `28 B5 2F FD` 不会误切）
-- 改完立刻用同一套解析重新读回校验（帧数不变、header 一行、cwd 正确）
-
-绝不能做"整文件解压 → 改 → 重压"：那会塌成单帧，`dsh web` 启动直接崩。
-
----
-
-## 安装 / 卸载
-
-**前置条件**：DSH（Web 版）`0.1.5-rc.1` 上实测通过；Node ≥ 20。插件**没有发布到 npm**，
-按下面的方式从源码安装即可，**不需要** `npm install`（本包没有任何运行时依赖）。
-
-`dsh plugin --profile web <参数>` 就是把参数交给 profile 目录里的 **pnpm**，所以两条路线都只是 pnpm 的依赖写法：
-
-| 路线 | 命令 | 装完是什么 |
-|---|---|---|
-| **A. 直接吃 GitHub** | `dsh plugin --profile web add github:wfql1024/dsh-workspace-migrate` | node_modules 里一份拷贝，最省事 |
-| **B. 先克隆再装** | `git clone … <目录>` + `dsh plugin --profile web add <目录>` | `link:` 到你的克隆，能 `git pull` 升级 |
-
-两条装完都**必须完全退出 DSH 再启动**（不是刷新页面）。
-
-### 路线 A：直接装（一条命令）
-
-```cmd
+```powershell
 dsh plugin --profile web add github:wfql1024/dsh-workspace-migrate
 ```
 
-### 路线 B：克隆后安装（便于 `git pull` 升级）
+### 从源码安装（便于 `git pull` 升级）
 
-`~` 只在 bash / Git Bash 里有意义。**cmd.exe 不会展开 `~`**，所以下面一律用绝对路径：
-
-```cmd
-:: cmd.exe
-git clone https://github.com/wfql1024/dsh-workspace-migrate.git "%USERPROFILE%\dsh-workspace-migrate"
-dsh plugin --profile web add "%USERPROFILE%\dsh-workspace-migrate"
-```
+`~` 只在 bash / Git Bash 里有意义，**cmd.exe 不会展开 `~`**，所以用绝对路径：
 
 ```powershell
 # PowerShell
 git clone https://github.com/wfql1024/dsh-workspace-migrate.git "$HOME\dsh-workspace-migrate"
 dsh plugin --profile web add "$HOME\dsh-workspace-migrate"
+```
+
+```cmd
+:: cmd.exe
+git clone https://github.com/wfql1024/dsh-workspace-migrate.git "%USERPROFILE%\dsh-workspace-migrate"
+dsh plugin --profile web add "%USERPROFILE%\dsh-workspace-migrate"
 ```
 
 ```bash
@@ -183,123 +86,97 @@ git clone https://github.com/wfql1024/dsh-workspace-migrate.git ~/dsh-workspace-
 dsh plugin --profile web add ~/dsh-workspace-migrate
 ```
 
-**为什么必须重启**：宿主插件树和浏览器模块图都是启动时合成的
-（`cordis-plugin-loader` 复用已加载模块的回调，它的 `import()` 不带破缓存参数），
-所以改完/装完的模块只有重启才会生效——**客户端半体刷新页面就能更新，宿主半体（路由）只有重启才会更新**，
-两者版本不一致时插件会明确提示"宿主半体还是旧版本"，而不是丢一个 404 给你猜。
-
-### 装不上时先看这里
-
-| 现象 | 原因 / 处理 |
-|---|---|
-| `Command failed with exit code 128: git ls-remote git+ssh://git@github.com/~/dsh-workspace-migrate.git` / `is not a valid repository name` | 你在 **cmd.exe** 里用了 `~/…`。cmd 不展开 `~`，pnpm 于是把 `~/dsh-workspace-migrate` 当成 GitHub 的 `owner/repo` 去解析。改用绝对路径（见路线 B），或直接用路线 A |
-| 装完界面没变化 | 没重启 DSH。宿主插件树是启动时合成的 |
-| 日志里 `could not register /api/…` | 有另一个插件占了同名路由；插件会跳过那一条并继续挂载，把日志贴出来即可 |
-| 按钮点了没反应、或用旧版行为 | 客户端半体刷新页面就更新，**宿主半体只有重启才更新**；两者不一致时对话框会直接说明 |
-| `dsh plugin --profile web remove` 之后 `node_modules` 里还有目录 | pnpm 会留下链接本身。删链接要用 `cmd /c rmdir <路径>`，**不要**用 `Remove-Item -Recurse`（后者可能把链接指向的真实目录内容一起删掉） |
-
-### 确认装好了
-
-启动日志里会出现一行：
+**装完必须完全退出 DSH 再启动**（不是刷新页面）。启动日志出现下面这行就说明挂上了：
 
 ```
 [dsh-workspace-migrate] mounted — 9/9 routes at /api/dsh-workspace-migrate, engine at <...>/lib/dsh-workspace-migrate.mjs
 ```
 
-界面上：**左侧侧栏底部出现「⇄ 迁移」**，对话标题栏右侧出现「迁移工作区」，设置里多一页「工作区迁移」。
+装好后浏览器如果还是旧界面，按 `Ctrl+Shift+R` 强制刷新。
 
-### 升级
+### 升级 / 卸载
 
-- 路线 A：重新执行一次 `add`（会取 GitHub 上的最新提交），然后重启 DSH。
-- 路线 B：`cd <你的克隆目录> && git pull`，然后重启 DSH。
+```powershell
+# 升级：github: 安装重新执行一次 add；克隆安装 git pull —— 然后都要重启 DSH
+dsh plugin --profile web add github:wfql1024/dsh-workspace-migrate
 
-（插件的 `lib/dsh-workspace-migrate.mjs` 引擎是每次调用起子进程，升级后立即生效；
-`index.js` / `client.js` / `lib/live-move.mjs` 需要重启。）
-
-### 卸载
-
-```bash
-dsh plugin --profile web remove dsh-workspace-migrate   # 然后重启 DSH
+# 卸载（然后重启 DSH）
+dsh plugin --profile web remove dsh-workspace-migrate
 ```
 
-卸载**不会**动你的会话、工作区或迁移备份；已经生成的 `migration-runs` / `migration-backups` 需要自己删。
+卸载**不会**动你的会话、工作区或迁移备份；已生成的 `migration-runs` / `migration-backups` 需要自己删。
 
-### 兼容性
+### 装不上时先看这里
 
-- 依赖 DSH 的私有面（`sessionPersistence.tracker.writers`、`workspaceRegistry.headers` /
-  `sessionPaths`、`sessions.flush`）。全部带 `typeof` 守卫：拿不到就**拒绝迁移运行中的会话**并说明原因，
-  而不是写坏数据。
-- 只提供 web 平台半体（`dsh.client.platform: "web"`）。
-- 没在这个 DSH 版本上验证过的组合，建议先用**只读预检**（面板上「开始迁移」的检查阶段、或
-  `workspace_migrate` 工具的 `live` + `dryRun`）看一遍再决定。
+| 现象 | 原因 / 处理 |
+|---|---|
+| `is not a valid repository name`（`git ls-remote git+ssh://git@github.com/~/...`） | 你在 **cmd.exe** 里用了 `~/…`。cmd 不展开 `~`，pnpm 把它当成 GitHub 的 `owner/repo`。改用绝对路径，或用 `github:` 那条 |
+| 装完界面没变化 | 没重启 DSH。宿主插件树是启动时合成的 |
+| 启动日志里 `could not register /api/…` | 有别的插件占了同名路由；插件会跳过那一条并继续挂载，把日志贴出来即可 |
+| 按钮点了没反应 / 行为是旧的 | 客户端半体刷新页面就更新，**宿主半体只有重启才更新**；两者不一致时对话框会直接说明 |
+| `remove` 之后 `node_modules` 里还有目录 | pnpm 会留下链接本身。删链接用 `cmd /c rmdir <路径>`，**不要**用 `Remove-Item -Recurse`（可能连链接指向的真实目录内容一起删） |
+| 报"目标路径已被 N 条工作区记录声明" | 同一路径被两条记录声明时 DSH 无法启动；先去侧栏删掉多余那条工作区记录 |
 
----
+## 安全与行为说明
 
-## 测试
+- **只改该改的**：项目目录（可选）、会话日志的 header `cwd`、会话工件所在的 `projectKey` 目录、
+  `workspace.json` 与投影缓存里指向旧路径的字段。**不改**会话历史内容。
+- **帧安全**：只重压第 0 帧，其余帧逐字节拷贝；改完立刻用同一套解析读回校验（帧数不变、header 一行、cwd 正确）。
+  绝不做"整文件解压 → 改 → 重压"（那会塌成单帧，DSH 直接崩）。
+- **会拒绝而不是硬来**：目标路径已被另一条**有会话的**工作区记录声明、源/目标路径被多条记录声明、
+  拿不到可重定向的写句柄、目标目录已存在（未勾选一起搬）、源路径不存在 —— 都会拒绝并说明原因。
+- **运行中的会话**：先 `flush` 让旧工件完整，然后在**一段没有 `await` 的同步代码**里重压第 0 帧、移动工件、
+  改写写句柄的 header —— 追加写不可能插进这一段，所以不会写坏日志。
+- **重启语义**：`index.js` / `client.js` / `lib/live-move.mjs` 的改动需要重启 DSH 才生效
+  （`lib/dsh-workspace-migrate.mjs` 引擎是每次调用起子进程，改完立即生效）。
+- **报告与备份**：`<DSH_HOME>/migration-runs/live-<时间戳>.json`（每次不停机迁移）、
+  `<DSH_HOME>/migration-runs/<时间戳>-<项目名>/`（停机计划）、
+  `<DSH_HOME>/migration-backups/<时间戳>/`（停机执行的备份 + manifest）。
+- HTTP 路由有**回环防护**（非回环地址 / 跨源一律 403），`/open-directory` 只允许打开
+  `<DSH_HOME>/migration-runs` 下的目录。
 
-```bash
-npm test                  # 四个套件
-npm run test:mutations    # 变异测试（每个关键机制都必须能被测出来）
-npm run test:all          # 两者都跑
-```
+## 兼容性
 
-```bash
-node test/selftest.mjs    # 引擎沙箱全流程：计划→执行→回滚，造假 DSH_HOME，帧逐字节校验（101 项）
-node test/livetest.mjs    # 不停机迁移编排：假服务按真实行为建模（122 项）
-node test/hosttest.mjs    # 挂载宿主半体 + 驱动真实 HTTP 路由（64 项）
-node test/clienttest.mjs  # 用最小 React 桩加载并渲染浏览器半体（59 项）
-```
-
-四个套件都不需要浏览器，也不碰真实数据（`LIVE` 相关用临时 DSH_HOME）。
-
-**测试里的假服务是按真实宿主行为建模的**，不是"能过就行"：`attachSession` 会真的 realpath 校验、
-header 缓存命中优先于磁盘、`delete` 会真的从数组里 splice、live header 带**别的 realm 的原型**。
-剩下两个只有真机才暴露的 bug（`sessions.flush(undefined)`、搬完留下空目录）就是这么逼出来的。
-
-配套的变异测试会故意打断每个关键机制，要求对应套件**必须变红**：
-
-| 变异 | 被打断的机制 | 结果 |
+| 插件版本 | 已验证 DSH 版本 | Node |
 |---|---|---|
-| `writer-rebind` | 不重定向 live writer | livetest 失败 |
-| `route-to-engine` | 把运行中会话丢给子进程引擎 | livetest 失败 |
-| `leave-old-dir` | 不清空目录 | livetest 失败 |
-| `plain-header-copy` | header 用普通拷贝重建（丢 realm 原型） | livetest 失败 |
-| `undo-session-header` | 回滚时不管 Session header | livetest 失败 |
-| `undo-writer-header` | 回滚时不管 writer header | livetest 失败 |
-| `report-not-written` | 报出报告路径却不写文件 | livetest 失败 |
-| `orphan-blocks-migration` | 空的孤儿会话目录被当成会话，挡住无关迁移 | selftest 失败 |
-| `picker-not-preselected` | 对话标题栏不再预选当前工作区 | clienttest 失败 |
+| 1.0.0 | v0.1.5-rc.1 | ≥ 20 |
 
-全部被抓到；不打断时各套件若干项全过。
+依赖 DSH 的私有面（`sessionPersistence.tracker.writers`、`workspaceRegistry.headers` / `sessionPaths`、
+`sessions.flush`），全部带 `typeof` 守卫：拿不到就**拒绝迁移运行中的会话**并说明原因，而不是写坏数据。
+只提供 web 平台半体（`dsh.client.platform: "web"`）。
 
----
+## 开发
 
-## 目录
-
-```
-index.js                       宿主半体：cordis 插件 + 回环防护 HTTP 路由 + workspace_migrate 工具
-client.js                      浏览器半体：手写 lazy-CJS，无打包步骤
-lib/dsh-workspace-migrate.mjs  迁移引擎（plan/apply/verify/rollback/list），子进程调用
-lib/live-move.mjs              不停机编排：预检 / 四层迁移 / 撤销栈 / 运行中会话重定向
-lib/zstd-frames.mjs            多帧 zstd 原语（帧切分、只重压第 0 帧、原子写、projectKey）
-cordis.patch.yml               把宿主行 insert 进 profile 组合
-docs/DESIGN-live-move.md       设计依据 + 在真实宿主上实测到的契约事实
-test/                          selftest / livetest / hosttest / clienttest
-tools/                         开发与变异测试脚本（不进 npm 包），见 tools/README.md
+```bash
+npm test                  # 四个套件（hosttest / clienttest / livetest / selftest）
+npm run test:mutations    # 变异测试：每个关键机制都必须能被测出来
+npm run test:all          # 两者都跑
+npm pack --dry-run        # 看会发布哪些文件
 ```
 
----
+- `index.js` 是宿主半体（cordis 插件 + HTTP 路由 + `workspace_migrate` 工具），`client.js` 是浏览器半体
+  （手写 lazy-CJS），`lib/` 是引擎与不停机编排 —— 全部 ESM，**没有编译步骤**。
+- 测试不需要浏览器、不碰真实 DSH_HOME；`tools/` 下是开发与诊断脚本（见 [`tools/README.md`](tools/README.md)）。
+- 提交前建议跑 `npm run test:all`：有变异没被抓到，它的退出码会非 0。
 
-## 安全边界与已知取舍
+## 文档
 
-- HTTP 路由**回环防护**：非 127/8 或 `::1` 的 socket、非回环 Host、`sec-fetch-site: cross-site`、
-  跨源 Origin 一律 403。另外整站还有浏览器鉴权闸门（未认证一律 401）。
-- 所有 `plan` / `verify` / `status` 都是只读的，可以随时调用。
-- `apply` 拒绝在 DSH 内执行，并返回停机后该跑的确切命令。
-- 依赖的是 DSH 的私有面（`tracker.writers`、`registry.headers` / `sessionPaths`）。全部带守卫：
-  拿不到就**拒绝迁移运行中的会话**并说明原因，而不是坏数据；索引类修复拿不到只降级为
-  "重启后分组才正确"。
-- 搬完之后**旧的空工作区记录会留在侧栏**，需要你自己右键删掉：DSH 没有改工作区 path 的公开 API，
-  保留旧记录比伪造一个新 id 更安全。
-- 投影缓存（`session_projcache`）在运行中会话上是 fail-soft 的：迁移时可能来不及 checkpoint，
-  下一次写入会自愈（实测确认）。
+开发者视角的长期记忆在 [`MEMORY/`](MEMORY/MEMORY.md)：
+
+| 文件 | 内容 |
+|---|---|
+| [`FACTS.md`](MEMORY/FACTS.md) | DSH 的实测契约与不变量（私有面、文件布局、宿主行为），只写亲自量过的 |
+| [`DECISION.md`](MEMORY/DECISION.md) | 设计决定与理由（背景 / 决定 / 理由 / 代价） |
+| [`DEV_LOGS.md`](MEMORY/DEV_LOGS.md) | 按日期的事故记录：三次真机翻车的现象、根因、修复、验证 |
+| [`TODOS.md`](MEMORY/TODOS.md) | 待办与已知缺口 |
+
+## 致谢
+
+感谢每一位安装和使用本插件的用户，也感谢提交 Issue 与 Pull Request 帮助改进的朋友。
+
+私有面用法参考了 [dsh-session-manager](https://github.com/hkkz9522/dsh-session-manager) 的实践 ——
+它做的是"会话跨工作区移动"，本插件做的是"整个工作区换路径"，两者互补。
+
+## 开源许可
+
+[MIT](LICENSE)

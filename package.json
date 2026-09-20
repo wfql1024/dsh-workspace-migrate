@@ -29,7 +29,7 @@
     "lib/zstd-frames.mjs",
     "cordis.patch.yml",
     "README.md",
-    "docs/DESIGN-live-move.md",
+    "MEMORY",
     "test"
   ],
   "scripts": {
