@@ -24,9 +24,9 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { readFile, readdir, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { basename, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inspectLiveMove, liveMoveSessions } from './lib/live-move.mjs'
 
@@ -334,33 +334,11 @@ async function pathKind(target) {
   }
 }
 
-/** Workspace registry rows, decorated with on-disk facts. */
-async function readWorkspaces() {
-  const file = join(dshHome(), 'storages', 'workspace.json')
-  let doc
-  try {
-    doc = JSON.parse(await readFile(file, 'utf8'))
-  } catch (error) {
-    return { file, workspaces: [], error: String((error && error.message) || error) }
-  }
-  const table = (doc && doc.tables && doc.tables.workspaces) || {}
-  const workspaces = []
-  for (const [id, value] of Object.entries(table)) {
-    if (value === null || typeof value !== 'object') continue
-    const pathValue = asString(value.path)
-    workspaces.push({
-      id,
-      title: asString(value.title),
-      path: pathValue,
-      sessionIds: Array.isArray(value.sessionIds) ? value.sessionIds.filter((x) => typeof x === 'string') : [],
-      pathState: pathValue.length > 0 ? await pathKind(pathValue) : 'missing',
-      archived: Array.isArray(doc.global && doc.global.archivedSessionIds)
-        ? doc.global.archivedSessionIds.filter((x) => typeof x === 'string')
-        : [],
-    })
-  }
-  return { file, workspaces, error: null }
-}
+/**
+ * Workspace registry rows, decorated with on-disk facts.
+ *
+ * Defined once, below (`readWorkspaces(ctx)`), where it prefers the live registry over the file.
+ */
 
 /**
  * Resolve a Session's workspace path without decoding its log. The projection cache
@@ -370,7 +348,7 @@ async function readWorkspaces() {
  * @param sessionId - a bare session id (validated by the caller).
  * @returns `{ cwd, workspaceId, workspaceTitle, source }`; `cwd` is null when unknown.
  */
-async function resolveSessionCwd(sessionId) {
+async function resolveSessionCwd(sessionId, ctx) {
   const perSession = join(dshHome(), 'storages', 'session_projcache', 'sessions', `${sessionId}.json`)
   const aggregate = join(dshHome(), 'storages', 'session_projcache.json')
 
@@ -403,7 +381,7 @@ async function resolveSessionCwd(sessionId) {
   let workspaceId = null
   let workspaceTitle = null
   if (cwd !== null) {
-    const registry = await readWorkspaces()
+    const registry = await readWorkspaces(ctx)
     const key = cwd.replace(/[\\/]+$/, '').toLowerCase()
     const match = registry.workspaces.find((workspace) => workspace.path.replace(/[\\/]+$/, '').toLowerCase() === key)
     if (match !== undefined) {
@@ -510,7 +488,11 @@ function createTool(ctx) {
         dryRun: { type: 'boolean', description: 'For action "live": report what would happen and why it might be refused, changing nothing' },
         moveProject: {
           type: 'boolean',
-          description: 'For action "live": also move the project directory itself (requires the destination to not exist yet). Default false, which assumes you moved it yourself.',
+          description: 'For action "live": also move the project directory itself. A destination that already holds files is refused unless backupTarget is set too.',
+        },
+        backupTarget: {
+          type: 'boolean',
+          description: 'For live/plan with a project move: park whatever the destination directory already holds on the Desktop, then move the project in. Without it, a non-empty destination is refused.',
         },
         sessions: { type: 'string', description: 'For action "live": comma-separated session ids to restrict the move to (default: every session in the source workspace)' },
         project: {
@@ -566,6 +548,7 @@ function createTool(ctx) {
           title: asString(args.title).length > 0 ? asString(args.title) : undefined,
           sessionIds: sessionIds.length > 0 ? sessionIds : undefined,
           moveProject: args.moveProject === true,
+          backupTarget: args.backupTarget === true,
         }
         const inspect = await inspectLive(services, liveOptions)
         if (args.dryRun === true) {
@@ -701,6 +684,93 @@ function requirePost(req, res) {
   return true
 }
 
+/**
+ * The workspace list, preferring the LIVE registry over `workspace.json`.
+ *
+ * The durable file is a projection the registry rewrites when it checkpoints, so a change another
+ * plugin made in memory — moving a session with dsh-session-manager, say — shows up in the sidebar
+ * immediately while the file still holds the old path. Reading only the file therefore reports a
+ * stale path until DSH restarts; the registry is asked first and the file is the fallback.
+ */
+async function readWorkspaces(ctx) {
+  const file = join(dshHome(), 'storages', 'workspace.json')
+  let doc = null
+  try {
+    doc = JSON.parse(await readFile(file, 'utf8'))
+  } catch (error) {
+    doc = null
+    if (!ctx) return { file, workspaces: [], error: String((error && error.message) || error), source: 'file' }
+  }
+  const archived =
+    doc !== null && Array.isArray(doc.global && doc.global.archivedSessionIds)
+      ? doc.global.archivedSessionIds.filter((value) => typeof value === 'string')
+      : []
+
+  const registry = ctx === undefined || ctx === null || typeof ctx.get !== 'function' ? undefined : ctx.get('workspaceRegistry')
+  if (registry !== undefined && registry !== null && typeof registry.list === 'function') {
+    try {
+      const entities = registry.list()
+      if (Array.isArray(entities)) {
+        const workspaces = []
+        for (const entity of entities) {
+          const record = entity && entity.record !== undefined && entity.record !== null ? entity.record : entity
+          const pathValue = asString((entity && entity.path) ?? (record && record.path))
+          const sessionIds = Array.isArray(record && record.sessionIds) ? record.sessionIds : []
+          workspaces.push({
+            id: asString(entity && entity.id),
+            title: asString(record && record.title),
+            path: pathValue,
+            sessionIds: sessionIds.filter((value) => typeof value === 'string'),
+            pathState: pathValue.length > 0 ? await pathKind(pathValue) : 'missing',
+            archived,
+          })
+        }
+        return { file, workspaces, error: null, source: 'registry' }
+      }
+    } catch (error) {
+      // Fall through to the file: a registry mid-update must not break the panel.
+    }
+  }
+  if (doc === null) {
+    return { file, workspaces: [], error: `could not read ${file}`, source: 'file' }
+  }
+  const table = (doc.tables && doc.tables.workspaces) || {}
+  const workspaces = []
+  for (const [id, value] of Object.entries(table)) {
+    if (value === null || typeof value !== 'object') continue
+    const pathValue = asString(value.path)
+    workspaces.push({
+      id,
+      title: asString(value.title),
+      path: pathValue,
+      sessionIds: Array.isArray(value.sessionIds) ? value.sessionIds.filter((x) => typeof x === 'string') : [],
+      pathState: pathValue.length > 0 ? await pathKind(pathValue) : 'missing',
+      archived,
+    })
+  }
+  return { file, workspaces, error: null, source: 'file' }
+}
+
+/** Normalized path key for comparing a staged run's source against the registry. */
+function pathKey(value) {
+  return asString(value)
+    .replace(/[\\/]+/g, '/')
+    .replace(/\/+$/, '')
+    .toLowerCase()
+}
+
+/**
+ * Mark every staged run as usable or not.
+ *
+ * A staged plan whose source path is no longer a registered workspace cannot be used for anything:
+ * either it has already been applied (the record moved to the destination) or the workspace was
+ * deleted. The panel shows those rows as「无法使用」and offers to clean them up.
+ */
+function markRunUsability(runs, workspaces) {
+  const registered = new Set(workspaces.map((workspace) => pathKey(workspace.path)))
+  return runs.map((run) => Object.assign({}, run, { usable: registered.has(pathKey(run.from)) }))
+}
+
 function makeRoutes(ctx) {
   return [
     {
@@ -709,7 +779,7 @@ function makeRoutes(ctx) {
       handler: async (req, res) => {
         if (!fenced(req, res)) return
         try {
-          const [registry, runs] = await Promise.all([readWorkspaces(), runEngine(['list', '--json'])])
+          const [registry, runs] = await Promise.all([readWorkspaces(ctx), runEngine(['list', '--json'])])
           let sessionsRoot = join(dshHome(), 'sessions')
           let projectKeys = []
           try {
@@ -719,6 +789,7 @@ function makeRoutes(ctx) {
           } catch {
             projectKeys = []
           }
+          const runList = runs.ok && runs.json && Array.isArray(runs.json.runs) ? runs.json.runs : []
           writeJson(res, 200, {
             ok: true,
             dshHome: dshHome(),
@@ -726,10 +797,11 @@ function makeRoutes(ctx) {
             api: API,
             workspaceFile: registry.file,
             workspaceFileError: registry.error,
+            workspaceSource: registry.source,
             workspaces: registry.workspaces,
             sessionsRoot,
             projectKeys,
-            runs: runs.ok && runs.json && Array.isArray(runs.json.runs) ? runs.json.runs : [],
+            runs: markRunUsability(runList, registry.workspaces),
             runsError: runs.ok ? null : String(runs.error),
           })
         } catch (error) {
@@ -752,6 +824,12 @@ function makeRoutes(ctx) {
         const argv = ['plan', '--from', from, '--to', to, '--json']
         if (asString(body.title).length > 0) argv.push('--title', asString(body.title))
         if (asString(body.project).length > 0) argv.push('--project', asString(body.project))
+        // "Back up the destination and overwrite": only meaningful together with a project move.
+        if (body.backupTarget === true && asString(body.project) !== 'keep') argv.push('--backup-target')
+        // Record where DSH was answering, so a later `check-quiescent` from the staged .cmd can
+        // detect a running DSH without relying on the process probe alone.
+        const origin = asString(req.headers && req.headers.host)
+        if (origin.length > 0) argv.push('--dsh-origin', origin)
         // A pure preview must not litter the run root with staged directories.
         if (body.noStage === true) argv.push('--no-stage')
         const result = await runEngine(argv)
@@ -771,7 +849,7 @@ function makeRoutes(ctx) {
           return
         }
         try {
-          const resolved = await resolveSessionCwd(sessionId)
+          const resolved = await resolveSessionCwd(sessionId, ctx)
           writeJson(res, 200, Object.assign({ ok: resolved.cwd !== null, sessionId }, resolved))
         } catch (error) {
           writeJson(res, 500, { ok: false, error: String((error && error.message) || error) })
@@ -796,6 +874,7 @@ function makeRoutes(ctx) {
             toPath,
             sessionIds: asStringArray(body.sessionIds),
             moveProject: body.moveProject === true,
+            backupTarget: body.backupTarget === true,
           })
           writeJson(res, 200, report)
         } catch (error) {
@@ -831,6 +910,7 @@ function makeRoutes(ctx) {
             title: asString(body.title).length > 0 ? asString(body.title) : undefined,
             sessionIds: asStringArray(body.sessionIds),
             moveProject: body.moveProject === true,
+            backupTarget: body.backupTarget === true,
           })
           writeJson(res, result.ok === true ? 200 : 409, result)
         } catch (error) {
@@ -872,6 +952,45 @@ function makeRoutes(ctx) {
         }
         const revealed = await revealDirectory(target)
         writeJson(res, revealed.ok === true ? 200 : 500, revealed)
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${API}/prune-runs`,
+      handler: async (req, res) => {
+        if (!fenced(req, res) || !requirePost(req, res)) return
+        try {
+          const [registry, listed] = await Promise.all([readWorkspaces(ctx), runEngine(['list', '--json'])])
+          const runs = listed.ok && listed.json && Array.isArray(listed.json.runs) ? listed.json.runs : []
+          const unusable = markRunUsability(runs, registry.workspaces).filter((run) => run.usable !== true)
+          const runsRoot = resolve(join(dshHome(), 'migration-runs'))
+          const removed = []
+          const refused = []
+          for (const run of unusable) {
+            // Re-derive the target from the run root and check containment again: the engine's list
+            // is trusted, but a recursive delete deserves its own fence.
+            const target = resolve(join(runsRoot, basename(asString(run.dir))))
+            if (!target.startsWith(runsRoot + sep)) {
+              refused.push({ dir: asString(run.dir), reason: 'outside the run root' })
+              continue
+            }
+            try {
+              await rm(target, { recursive: true, force: true })
+              removed.push({ dir: target, from: asString(run.from) })
+            } catch (error) {
+              refused.push({ dir: target, reason: String((error && error.message) || error) })
+            }
+          }
+          writeJson(res, 200, {
+            ok: true,
+            removed,
+            refused,
+            kept: runs.length - removed.length,
+            runsRoot,
+          })
+        } catch (error) {
+          writeJson(res, 500, { ok: false, error: String((error && error.message) || error) })
+        }
       },
     },
     {

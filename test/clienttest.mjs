@@ -116,7 +116,8 @@ const PANEL_HOOKS = [
 	'verify',
 	'prefilled',
 	'manual',
-	'moveProject',
+	'moveFiles',
+	'backupTarget',
 	'liveInspect',
 	'liveResult',
 	'expanded',
@@ -127,7 +128,7 @@ const PANEL_HOOKS = [
 async function renderPanelWith(overrides) {
 	// Slot 0 is the dialog state the panel reads (`useDialog()`), the rest mirror Panel's own
 	// `useState` defaults. `open: true` keeps every section rendered.
-	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, false, false, null, null, {}, null]
+	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, false, true, false, null, null, {}, null]
 	for (const [name, value] of Object.entries(overrides)) {
 		const slot = PANEL_HOOKS.indexOf(name)
 		if (slot === -1) throw new Error(`unknown panel hook: ${name}`)
@@ -318,11 +319,13 @@ ok(
 	'a staged row is the path line plus one button',
 )
 ok('no verify button is offered for a staged run', !/dwsm-item[\s\S]{0,400}?verify/.test(panelHtml), 'verify is the second script, run while DSH is down')
-ok('the manual mode is a checkbox, not a mode switch', panelHtml.includes('手动迁移') && !panelHtml.includes('不停机迁移（推荐）') && !panelHtml.includes('>方式<'), 'the manual flow must be behind a checkbox')
+ok('the manual mode is a checkbox, not a mode switch', panelHtml.includes('手动迁移') && !panelHtml.includes('不停机迁移（推荐）'), 'the manual flow must be behind a checkbox')
 ok('the primary action is a plain「开始迁移」', panelHtml.includes('开始迁移') && !panelHtml.includes('预检'), 'the preflight step must be folded into the action')
 ok('the panel no longer prints the home directory or the engine path', !panelHtml.includes('DSH_HOME:') && !panelHtml.includes('引擎:'), 'internal paths are not user-facing')
-ok('the panel states the shutdown requirement for the manual flow', panelHtml.includes('退出 DSH 后自己执行脚本'))
-ok('the panel still offers to move the project directory too', panelHtml.includes('帮我把项目目录一起搬过去'))
+ok('the manual-flow explanation lives behind an「i」, not in the label', !panelHtml.includes('手动迁移（') && /dwsm-i[^>]*>i</.test(panelHtml), 'the checkbox label must be just「手动迁移」')
+ok('「从」is picker-only', panelHtml.includes('readOnly'), 'the source path must come from the workspace picker')
+ok('the destination choice is a two-option slider, files first', panelHtml.includes('连同文件迁移') && panelHtml.includes('仅修改目录') && /dwsm-mode-on">连同文件迁移/.test(panelHtml), '「连同文件迁移」must be the default')
+ok('「自动备份目标并覆盖」is offered next to the slider', panelHtml.includes('自动备份目标并覆盖'), 'the overwrite-with-backup option must exist')
 ok('no crash placeholder leaked into the markup', !panelHtml.includes('undefined'))
 
 console.log('\n[5] entries')

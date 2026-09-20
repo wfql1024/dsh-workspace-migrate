@@ -579,7 +579,7 @@ console.log('\n[11] moveProject refuses an existing destination')
   const registry = fakeRegistry(home)
   const inspect = await inspectLiveMove(fakeServices({ registry }), { fromPath: home.from, toPath: home.to, moveProject: true })
   ok('is refused', inspect.ok === false, JSON.stringify(inspect.blockers))
-  ok('says the destination exists', /destination already exists/.test(inspect.blockers.join(' ')), JSON.stringify(inspect.blockers))
+  ok('says the destination holds files', /already holds files/.test(inspect.blockers.join(' ')), JSON.stringify(inspect.blockers))
   ok('reports the project facts', inspect.project.sourceExists === true && inspect.project.destinationExists === true && inspect.project.willMove === true, JSON.stringify(inspect.project))
 
   const move = await withHome(home, () =>
@@ -766,7 +766,7 @@ console.log('\n[16] a real project-directory move leaves nothing behind at the s
   fs.mkdirSync(to, { recursive: true })
   fs.writeFileSync(path.join(to, 'occupied.txt'), 'z\n')
   const refused = moveProjectDirectory(from, to, { replaceEmptyDestination: true })
-  ok('a non-empty destination is still refused', refused.ok === false && /already exists/.test(String(refused.error)), JSON.stringify(refused))
+  ok('a non-empty destination is still refused without the backup flag', refused.ok === false && /already holds files/.test(String(refused.error)), JSON.stringify(refused))
   ok('the refused move changed nothing', fs.existsSync(path.join(from, 'marker.txt')) && fs.existsSync(path.join(to, 'occupied.txt')))
   fs.rmSync(root, { recursive: true, force: true })
 }
@@ -834,6 +834,69 @@ console.log('\n[18] two records claiming the destination is refused')
   ok('the move itself is refused too', move.ok === false && move.stage === 'precondition', JSON.stringify(move.stage))
   ok('nothing was touched', fs.existsSync(path.join(home.oldKeyDir, 'session-1')) && registry.entities.length === 3, JSON.stringify(registry.entities.map((entity) => entity.id)))
   fs.rmSync(home.root, { recursive: true, force: true })
+}
+
+// ── a destination that already holds files: park it, then overwrite ────────
+console.log('\n[19] a non-empty destination is parked on the Desktop, then overwritten')
+{
+  const home = makeHome('backup', ['session-1'])
+  // `makeHome` writes readme.txt into both sides, so the destination has content already.
+  const fakeHome = path.join(home.root, 'fake-user')
+  const fakeDesktop = path.join(fakeHome, 'Desktop')
+  fs.mkdirSync(fakeDesktop, { recursive: true })
+  const previousProfile = process.env.USERPROFILE
+  process.env.USERPROFILE = fakeHome
+  try {
+    const registry = fakeRegistry(home)
+    const services = fakeServices({ registry, sessionsRoot: home.sessionsRoot, cwdBySession: { 'session-1': home.from } })
+
+    const refused = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to, moveProject: true })
+    ok('without the flag a destination that holds files is refused', refused.ok === false && /already holds files/.test(refused.blockers.join(' ')), JSON.stringify(refused.blockers))
+
+    const allowed = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to, moveProject: true, backupTarget: true })
+    ok('with the flag the same move is allowed', allowed.ok === true, JSON.stringify(allowed.blockers))
+    ok('and it says where the old files will go', allowed.notes.some((note) => /parked on your Desktop/.test(note)), JSON.stringify(allowed.notes))
+
+    const result = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to, moveProject: true, backupTarget: true }))
+    ok('the move succeeds', result.ok === true, JSON.stringify(result.blockers ?? result))
+    ok('the source file is what now lives at the destination', fs.readFileSync(path.join(home.to, 'readme.txt'), 'utf8') === 'x\n', fs.readFileSync(path.join(home.to, 'readme.txt'), 'utf8'))
+    const parked = fs.readdirSync(fakeDesktop).filter((name) => name.startsWith('dsh-workspace-migrate-backup-'))
+    ok('the destination tree was parked on the Desktop', parked.length === 1, JSON.stringify(fs.readdirSync(fakeDesktop)))
+    ok('the parked copy still holds the old file', fs.readFileSync(path.join(fakeDesktop, parked[0], 'readme.txt'), 'utf8') === 'y\n')
+    ok('the report says where it went', (result.notes ?? []).some((note) => /parked at .*Desktop/.test(note)), JSON.stringify(result.notes))
+  } finally {
+    if (previousProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousProfile
+    fs.rmSync(home.root, { recursive: true, force: true })
+  }
+}
+
+// ── and a failed move puts the parked tree back ────────────────────────────
+console.log('\n[20] a failed move puts the parked destination tree back')
+{
+  const home = makeHome('backupundo', ['session-1'], { destinationExists: false })
+  fs.mkdirSync(home.to, { recursive: true })
+  fs.writeFileSync(path.join(home.to, 'old.txt'), 'keep me\n')
+  const fakeHome = path.join(home.root, 'fake-user')
+  const fakeDesktop = path.join(fakeHome, 'Desktop')
+  fs.mkdirSync(fakeDesktop, { recursive: true })
+  const previousProfile = process.env.USERPROFILE
+  process.env.USERPROFILE = fakeHome
+  try {
+    const registry = fakeRegistry(home, { failAttach: true })
+    const services = fakeServices({ registry, sessionsRoot: home.sessionsRoot, cwdBySession: { 'session-1': home.from } })
+    const result = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to, moveProject: true, backupTarget: true }))
+
+    ok('fails in the memory layer', result.ok === false && result.stage === 'memory-layer', JSON.stringify(result.stage))
+    ok('the project came back to the source', fs.existsSync(path.join(home.from, 'readme.txt')))
+    ok('the parked tree is back at the destination', fs.existsSync(path.join(home.to, 'old.txt')) && fs.readFileSync(path.join(home.to, 'old.txt'), 'utf8') === 'keep me\n')
+    ok('the Desktop no longer holds a parked copy', fs.readdirSync(fakeDesktop).filter((name) => name.startsWith('dsh-workspace-migrate-backup-')).length === 0, JSON.stringify(fs.readdirSync(fakeDesktop)))
+    ok('the rollback reported no undo error', Array.isArray(result.rollback?.undoErrors) && result.rollback.undoErrors.length === 0, JSON.stringify(result.rollback))
+  } finally {
+    if (previousProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousProfile
+    fs.rmSync(home.root, { recursive: true, force: true })
+  }
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

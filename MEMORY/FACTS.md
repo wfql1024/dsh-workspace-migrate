@@ -53,6 +53,7 @@
 | `registry.create(path, title)` | 会对路径做 `realpathNormalize` + `stat().isDirectory()`；**同一路径重复调用返回已存在的实体**（幂等），不改标题 | 不停机路径不会制造重复声明，但会**静默挑一条**、留下另一条 —— 所以要预检拒绝 |
 | 没有改路径的 API | 公开方法只有 `create / get / list / delete / insertBefore / archiveSession / resolveByPath` | 所以"旧记录变空留在侧栏"是设计取舍（D13） |
 | 谁拥有这个文件 | registry 的内存投影，**每次变更都会回写** | 运行中的 DSH 会盖掉外部编辑 —— 修数据必须走 registry，不能直接改文件（DEV_LOGS 2026-09-19） |
+| 读它来判断"工作区现在在哪" | **不可靠**：文件只在 registry checkpoint 时才更新，别的插件在内存里改了 path，侧栏立刻变、文件还是旧的 | 面板必须**先问活 registry**（`ctx.workspaceRegistry.list()`），文件只作兜底（D16；hosttest [11] 有断言） |
 
 ## 4. 投影缓存
 
@@ -86,6 +87,8 @@
 | `~` 在 cmd.exe | **不展开**。`dsh plugin --profile web add ~/x` 会被 pnpm 当成 GitHub 的 `owner/repo`，报 `is not a valid repository name`（2026-09-19 实测） |
 | 删 junction | 用 `cmd /c rmdir <链接>`；`Remove-Item -Recurse` 可能连链接指向的真实目录内容一起删 |
 | `Get-CimInstance` 探测 DSH 进程 | 偶发失败（超时/无输出）。失败时**不能**当作"没有 DSH 在跑"（D9 就是为此） |
+| 进程探测的**漏报** | 真机遇到过：DSH 明明在运行，从 `1-apply-migration.cmd` 里跑探测却返回"没找到" → 于是加了第二个信号：计划里记下 DSH 当时服务的 `host:port`，用 TCP 连接判断它是否还在（D9） |
+| 桌面的真实位置 | Windows 上可能是 `%USERPROFILE%\Desktop`、`%USERPROFILE%\OneDrive\Desktop`，本地化安装还可能是 `桌面` —— 三个候选按顺序取第一个存在的 |
 
 ## 8. 插槽与注册（客户端半体）
 

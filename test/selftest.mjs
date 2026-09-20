@@ -10,6 +10,7 @@ import os from 'node:os'
 import zlib from 'node:zlib'
 import crypto from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import net from 'node:net'
 import { fileURLToPath } from 'node:url'
 
 // The engine under the package's lib/, one level up from this test.
@@ -598,6 +599,7 @@ console.log('\n[Test K] the staged scripts guard against a running DSH')
   ok('1-apply-migration.cmd checks for a running DSH first', applyCmd.includes('check-quiescent'), applyCmd)
   ok('and it refuses with an explanation', /if errorlevel 1/.test(applyCmd) && /Quit DSH completely/.test(applyCmd), applyCmd)
   ok('the check runs before the migration', applyCmd.indexOf('check-quiescent') < applyCmd.indexOf('apply --plan'), 'the guard must come first')
+  ok('the check is given the plan, so it can probe the recorded origin', applyCmd.includes('check-quiescent --plan'), applyCmd)
   ok('the rollback script is guarded too', rollbackCmd.includes('check-quiescent'), rollbackCmd)
   ok('the read-only verify script needs no guard', !verifyCmd.includes('check-quiescent'), verifyCmd)
 
@@ -606,6 +608,79 @@ console.log('\n[Test K] the staged scripts guard against a running DSH')
   ok('check-quiescent answers with 0 or 1', guard.code === 0 || guard.code === 1, `exit ${guard.code}`)
   const said = `${guard.stdout}${guard.stderr}`
   ok('it says which way it decided', /safe to continue|still running|could not determine/.test(said), said.trim())
+}
+
+// ── Test L: the recorded origin is probed, and it can decide on its own ─────
+//
+// The process probe alone once said "no DSH" while DSH was running. A plan now records the origin
+// DSH was serving; if that port answers, the guard refuses no matter what the process list says.
+console.log('\n[Test L] a plan remembers where DSH was serving, and the guard probes it')
+{
+  const root = freshRoot('L')
+  const env = scenario(root, { sessions: [{ id: 'session-eeeeeeee-1111-1111-1111-111111111111', versions: [3] }] })
+  const base = ['--dsh-home', env.dshHome, '--json']
+
+  const server = net.createServer()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  const origin = `127.0.0.1:${port}`
+  try {
+    const plan = run(['plan', '--from', env.from, '--to', env.to, '--project', 'keep', '--dsh-origin', origin, ...base])
+    ok('the plan records the origin', plan.json?.running?.origin === origin, JSON.stringify(plan.json?.running))
+    ok('and warns that DSH is answering there', (plan.json?.warnings ?? []).some((w) => /is answering on/.test(w)), JSON.stringify(plan.json?.warnings))
+
+    const listening = run(['check-quiescent', '--dsh-origin', origin, ...base])
+    ok('a listening origin is a refusal', listening.code === 1, `exit ${listening.code}`)
+    ok('and the refusal names the http origin', listening.stderr.includes(origin) && /http:/.test(listening.stderr), listening.stderr.trim())
+
+    const viaPlan = run(['check-quiescent', '--plan', plan.json.stage.planFile, ...base])
+    ok('reading the origin from the plan refuses too', viaPlan.code === 1, `exit ${viaPlan.code}`)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+
+  const silent = run(['check-quiescent', '--dsh-origin', origin, ...base])
+  const said = `${silent.stdout}${silent.stderr}`
+  ok('a port nobody answers on is never reported as listening', !/http:/.test(said) || !said.includes(origin), said.trim())
+  ok('and the guard still answers 0 or 1', silent.code === 0 || silent.code === 1, `exit ${silent.code}`)
+}
+
+// ── Test M: moving the files into a destination that holds files ────────────
+console.log('\n[Test M] a non-empty destination is parked on the Desktop, then overwritten')
+{
+  const root = freshRoot('M')
+  const env = scenario(root, { sessions: [{ id: 'session-ffffffff-1111-1111-1111-111111111111', versions: [3] }] })
+  const base = ['--dsh-home', env.dshHome, '--json']
+  // The destination already holds a file; the engine must park it on the Desktop before moving in.
+  fs.mkdirSync(env.to, { recursive: true })
+  fs.writeFileSync(path.join(env.to, 'occupant.txt'), 'old destination file\n')
+
+  const fakeHome = path.join(root, 'fake-user')
+  fs.mkdirSync(path.join(fakeHome, 'Desktop'), { recursive: true })
+  const previousProfile = process.env.USERPROFILE
+  process.env.USERPROFILE = fakeHome
+  try {
+    const refused = run(['plan', '--from', env.from, '--to', env.to, '--project', 'move', ...base])
+    ok('without the flag the plan is refused', refused.json?.ok === false, JSON.stringify(refused.json?.errors))
+    ok('and it names the reason', JSON.stringify(refused.json?.errors ?? []).includes('already holds'), JSON.stringify(refused.json?.errors))
+
+    const plan = run(['plan', '--from', env.from, '--to', env.to, '--project', 'move', '--backup-target', ...base])
+    ok('with the flag the plan is ok', plan.json?.ok === true, JSON.stringify(plan.json?.errors))
+    ok('the plan says where the old files go', typeof plan.json?.project?.backupDir === 'string' && plan.json.project.backupDir.includes('Desktop'), JSON.stringify(plan.json?.project))
+    ok('and warns about it', (plan.json?.warnings ?? []).some((w) => /will be moved to/.test(w)), JSON.stringify(plan.json?.warnings))
+
+    const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
+    ok('apply exits 0', apply.code === 0, apply.json?.error ?? apply.stderr.trim())
+    ok('the source file is now at the destination', fs.existsSync(path.join(env.to, 'src', 'nested', 'a.txt')) && !fs.existsSync(path.join(env.to, 'occupant.txt')))
+    const parkedAt = plan.json.project.backupDir
+    ok('the old destination file is parked', fs.existsSync(path.join(parkedAt, 'occupant.txt')), parkedAt)
+    ok('the parked copy is intact', fs.readFileSync(path.join(parkedAt, 'occupant.txt'), 'utf8') === 'old destination file\n')
+    const verify = run(['verify', '--plan', plan.json.stage.planFile, ...base])
+    ok('verify passes', verify.json?.ok === true, JSON.stringify(verify.json?.failures))
+  } finally {
+    if (previousProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = previousProfile
+  }
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

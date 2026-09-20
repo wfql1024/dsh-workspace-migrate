@@ -117,7 +117,7 @@ async function call(path, { method = 'GET', body, ...rest } = {}) {
 console.log('\n[1] mounting')
 ok('plugin exposes a name', plugin.name === 'dsh-workspace-migrate', plugin.name)
 ok('plugin injects webServer', Array.isArray(plugin.inject) && plugin.inject.includes('webServer'))
-ok('registers nine routes', routes.length === 9, `got ${routes.length}: ${routes.map((r) => r.path).join(', ')}`)
+ok('registers ten routes', routes.length === 10, `got ${routes.length}: ${routes.map((r) => r.path).join(', ')}`)
 ok('every route is exact-kind', routes.every((route) => route.kind === 'exact'))
 ok('registers the workspace_migrate tool', tool !== null && tool.name === 'workspace_migrate', tool ? tool.name : 'none')
 ok('tool declares all five actions', JSON.stringify(tool.parameters.properties.action.enum) === JSON.stringify(['live', 'plan', 'status', 'verify', 'apply']), JSON.stringify(tool.parameters.properties.action.enum))
@@ -268,7 +268,7 @@ console.log('\n[8] a colliding route must not take down the plugin')
 		threw = error
 	}
 	ok('apply() survives a colliding route', threw === null, threw && threw.message)
-	ok('the remaining routes still mounted', partial.length === 8, `${partial.length}: ${partial.join(', ')}`)
+	ok('the remaining routes still mounted', partial.length === 9, `${partial.length}: ${partial.join(', ')}`)
 	ok('the colliding route is the only one missing', !partial.some((p) => p.endsWith('/state')))
 }
 
@@ -405,6 +405,68 @@ console.log('\n[10] the open-directory route')
   }
   if (!previous) fs.rmSync(staged, { recursive: true, force: true })
   delete process.env.DSH_WORKSPACE_MIGRATE_DRY_OPEN
+}
+
+console.log('\n[11] the state route prefers the live registry, and stale runs can be pruned')
+{
+  // Two facts are checked here. First: a workspace path another plugin changed in memory must show
+  // up immediately, so the route reads the registry before workspace.json. Second: a staged run
+  // whose source is no longer a registered workspace is unusable, and only those may be pruned.
+  const home = path.join(os.tmpdir(), `dwsm-hosttest-runs-${crypto.randomUUID().slice(0, 8)}`)
+  const runsRoot = path.join(home, 'migration-runs')
+  const staleDir = path.join(runsRoot, '2026-01-01T00-00-00-000Z-stale')
+  const liveDir = path.join(runsRoot, '2026-01-02T00-00-00-000Z-live')
+  fs.mkdirSync(staleDir, { recursive: true })
+  fs.mkdirSync(liveDir, { recursive: true })
+  fs.writeFileSync(path.join(staleDir, 'plan.json'), JSON.stringify({ from: 'C:\\gone\\Workspace', to: 'C:\\new\\Workspace' }))
+  fs.writeFileSync(path.join(liveDir, 'plan.json'), JSON.stringify({ from: 'C:\\kept\\Workspace', to: 'C:\\new2\\Workspace' }))
+  fs.mkdirSync(path.join(home, 'storages'), { recursive: true })
+  fs.writeFileSync(
+    path.join(home, 'storages', 'workspace.json'),
+    JSON.stringify({
+      unit: { name: 'workspace', version: 2 },
+      global: { initialized: true, workspaceIds: ['w1'], archivedSessionIds: [] },
+      tables: { workspaces: { w1: { path: 'C:/stale/Workspace', title: 'Stale', sessionIds: [] } } },
+    }),
+  )
+
+  const previousHome = process.env.DSH_HOME
+  const originalGet = ctx.get
+  process.env.DSH_HOME = home
+  ctx.get = (name) =>
+    name === 'workspaceRegistry'
+      ? {
+          list: () => [
+            { id: 'w1', path: 'C:\\kept\\Workspace', record: { path: 'C:\\kept\\Workspace', title: 'Kept', sessionIds: [] } },
+          ],
+        }
+      : originalGet.call(ctx, name)
+  try {
+    const stated = await call('/api/dsh-workspace-migrate/state')
+    ok('state answers 200', stated.status === 200, `status ${stated.status}`)
+    ok('the workspace list comes from the live registry', stated.payload.workspaceSource === 'registry', JSON.stringify(stated.payload.workspaceSource))
+    ok('the path is the live one, not the one on disk', stated.payload.workspaces[0]?.path === 'C:\\kept\\Workspace', JSON.stringify(stated.payload.workspaces))
+    const stale = stated.payload.runs.find((run) => run.dir.endsWith('stale'))
+    const live = stated.payload.runs.find((run) => run.dir.endsWith('live'))
+    ok('a run whose source is gone is marked unusable', stale !== undefined && stale.usable === false, JSON.stringify(stale))
+    ok('a run whose source is registered stays usable', live !== undefined && live.usable === true, JSON.stringify(live))
+
+    const pruned = await call('/api/dsh-workspace-migrate/prune-runs', { method: 'POST', body: {} })
+    ok('prune answers 200', pruned.status === 200 && pruned.payload.ok === true, JSON.stringify(pruned.payload))
+    ok('it removed exactly the unusable run', pruned.payload.removed?.length === 1 && pruned.payload.removed[0].dir.endsWith('stale'), JSON.stringify(pruned.payload.removed))
+    ok('the unusable run directory is gone', !fs.existsSync(staleDir))
+    ok('the usable run directory is untouched', fs.existsSync(liveDir) && fs.existsSync(path.join(liveDir, 'plan.json')))
+    ok('it reports what it kept', pruned.payload.kept === 1, JSON.stringify(pruned.payload.kept))
+
+    const again = await call('/api/dsh-workspace-migrate/prune-runs', { method: 'POST', body: {} })
+    ok('a second prune removes nothing', again.payload.removed?.length === 0, JSON.stringify(again.payload.removed))
+    ok('and the usable run is still there', fs.existsSync(liveDir))
+  } finally {
+    ctx.get = originalGet
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    fs.rmSync(home, { recursive: true, force: true })
+  }
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

@@ -266,7 +266,13 @@ window.__ModuleLoader__.load({
 			 * the default because it is the normal path, not an advanced one.
 			 */
 			const [manual, setManual] = react.useState(false);
-			const [moveProject, setMoveProject] = react.useState(false);
+			/**
+			 * How the destination is reached: move the project's files there too (default), or only
+			 * re-point the workspace at a path the user has already prepared. With the files moving,
+			 * `backupTarget` parks whatever the destination already holds on the Desktop first.
+			 */
+			const [moveFiles, setMoveFiles] = react.useState(true);
+			const [backupTarget, setBackupTarget] = react.useState(false);
 			const [liveInspect, setLiveInspect] = react.useState(null);
 			const [liveResult, setLiveResult] = react.useState(null);
 			/** Which result rows are open; an explicit toggle wins, otherwise the default applies. */
@@ -274,10 +280,11 @@ window.__ModuleLoader__.load({
 			const rowOpen = (key, defaultOpen) => (expanded[key] === undefined ? defaultOpen === true : expanded[key] === true);
 			const toggleRow = (key) => setExpanded((current) => Object.assign({}, current, { [key]: current[key] !== true }));
 			/**
-			 * Outcome of the last「打开目录」attempt, attached to the row that asked for it.
+			 * Outcome of the last「打开目录」／「清理无法使用的暂存」attempt, attached to the row that
+			 * asked for it.
 			 *
-			 * Launching a file manager produces no visible change inside the page, so without
-			 * this a successful request looks exactly like a dead button.
+			 * Launching a file manager produces no visible change inside the page, so without this a
+			 * successful request looks exactly like a dead button.
 			 */
 			const [openNotice, setOpenNotice] = react.useState(null);
 
@@ -311,7 +318,7 @@ window.__ModuleLoader__.load({
 				setLiveInspect(null);
 				setLiveResult(null);
 				setPlan(null);
-				callApi("/live-inspect", { from: from.trim(), to: to.trim(), moveProject: moveProject }).then(
+				callApi("/live-inspect", { from: from.trim(), to: to.trim(), moveProject: moveFiles, backupTarget: backupTarget }).then(
 					(result) => {
 						const payload = result.payload;
 						if (!(payload && typeof payload.ok === "boolean")) {
@@ -324,7 +331,7 @@ window.__ModuleLoader__.load({
 							setBusy(false);
 							return;
 						}
-						callApi("/live-move", { from: from.trim(), to: to.trim(), moveProject: moveProject, confirm: true }).then(
+						callApi("/live-move", { from: from.trim(), to: to.trim(), moveProject: moveFiles, backupTarget: backupTarget, confirm: true }).then(
 							(moved) => {
 								const outcome = moved.payload;
 								if (outcome && typeof outcome.ok === "boolean") {
@@ -375,6 +382,39 @@ window.__ModuleLoader__.load({
 						setOpenNotice({ row: row, ok: false, text: result.payload.error ? text(result.payload.error) : "无法打开目录（HTTP " + text(result.status) + "）" });
 					},
 					(reason) => setOpenNotice({ row: row, ok: false, text: String((reason && reason.message) || reason) }),
+				);
+			};
+
+			/**
+			 * Delete the staged runs whose source is no longer a registered workspace.
+			 *
+			 * The host recomputes which runs those are (and refuses to delete anything else), so the
+			 * button cannot delete a run that is still usable.
+			 */
+			const pruneRuns = () => {
+				setBusy(true);
+				callApi("/prune-runs", {}).then(
+					(result) => {
+						const payload = result.payload;
+						if (payload && payload.ok === true) {
+							const removed = Array.isArray(payload.removed) ? payload.removed : [];
+							setOpenNotice({
+								row: "runs",
+								ok: true,
+								text: removed.length === 0 ? "没有可清理的暂存记录。" : "已清理 " + text(removed.length) + " 条无法使用的暂存记录。",
+							});
+							refresh();
+						} else if (payload === null) {
+							setOpenNotice({ row: "runs", ok: false, text: "宿主半体还是旧版本，没有 /prune-runs 路由；重启 DSH 后才可用（HTTP " + text(result.status) + "）。" });
+						} else {
+							setOpenNotice({ row: "runs", ok: false, text: payload && payload.error ? text(payload.error) : "清理失败（HTTP " + text(result.status) + "）" });
+						}
+						setBusy(false);
+					},
+					(reason) => {
+						setOpenNotice({ row: "runs", ok: false, text: String((reason && reason.message) || reason) });
+						setBusy(false);
+					},
 				);
 			};
 
@@ -454,9 +494,9 @@ window.__ModuleLoader__.load({
 				setError(null);
 				setPlan(null);
 				setVerify(null);
-				// The project-directory checkbox applies to the manual flow too: without this the
-				// staged script would leave the project where it is and the checkbox would lie.
-				callApi("/plan", { from: from.trim(), to: to.trim(), project: moveProject ? "move" : "keep" }).then(
+				// The「方式」slider applies to the manual flow too: without this the staged script
+				// would leave the project where it is and the slider would lie.
+				callApi("/plan", { from: from.trim(), to: to.trim(), project: moveFiles ? "move" : "keep", backupTarget: backupTarget }).then(
 					(result) => {
 						const payload = result.payload;
 						if (payload && payload.ok === true && payload.json) {
@@ -565,8 +605,11 @@ window.__ModuleLoader__.load({
 							className: "dwsm-input",
 							value: from,
 							spellCheck: false,
-							placeholder: "当前工作区路径",
-							onChange: (event) => editFrom(event.target.value),
+							// The source must be a registered workspace, so it is chosen from the picker
+							// above rather than typed: a typo here used to read as "nothing to migrate".
+							readOnly: true,
+							title: "由上面的工作区下拉框选择",
+							placeholder: "在上面的下拉框里选择工作区",
 						}),
 					),
 					react.createElement(
@@ -581,35 +624,102 @@ window.__ModuleLoader__.load({
 							onChange: (event) => editTo(event.target.value),
 						}),
 					),
+					// 「连同文件迁移」/「仅修改目录」: a slider, because the old checkbox asked the user to
+					// know whether the destination directory exists — and phrased the choice as an extra.
 					react.createElement(
-						"label",
-						{ className: "dwsm-check" },
-						react.createElement("input", {
-							type: "checkbox",
-							checked: moveProject,
-							onChange: (event) => {
-								setMoveProject(event.target.checked);
-								setLiveInspect(null);
-								setLiveResult(null);
-							},
-						}),
-						"目标目录还不存在，帮我把项目目录一起搬过去",
+						"div",
+						{ className: "dwsm-row" },
+						react.createElement("span", { className: "dwsm-label" }, "方式"),
+						react.createElement(
+							"div",
+							{ className: "dwsm-modes" },
+							react.createElement(
+								"button",
+								{
+									type: "button",
+									className: "dwsm-mode" + (moveFiles ? " dwsm-mode-on" : ""),
+									onClick: () => {
+										setMoveFiles(true);
+										setLiveInspect(null);
+										setLiveResult(null);
+										setPlan(null);
+									},
+								},
+								"连同文件迁移",
+							),
+							react.createElement(
+								"button",
+								{
+									type: "button",
+									className: "dwsm-mode" + (moveFiles ? "" : " dwsm-mode-on"),
+									onClick: () => {
+										setMoveFiles(false);
+										setBackupTarget(false);
+										setLiveInspect(null);
+										setLiveResult(null);
+										setPlan(null);
+									},
+								},
+								"仅修改目录",
+							),
+						),
+						// Only meaningful while the files are being moved: with「仅修改目录」nothing is copied
+						// over, so there is nothing to back up.
+						moveFiles
+							? react.createElement(
+									"label",
+									{ className: "dwsm-check" },
+									react.createElement("input", {
+										type: "checkbox",
+										checked: backupTarget,
+										onChange: (event) => {
+											setBackupTarget(event.target.checked);
+											setLiveInspect(null);
+											setLiveResult(null);
+											setPlan(null);
+										},
+									}),
+									"自动备份目标并覆盖",
+								)
+							: null,
 					),
 					react.createElement(
-						"label",
-						{ className: "dwsm-check" },
-						react.createElement("input", {
-							type: "checkbox",
-							checked: manual,
-							onChange: (event) => {
-								setManual(event.target.checked);
-								setLiveInspect(null);
-								setLiveResult(null);
-								setPlan(null);
+						"div",
+						{ className: "dwsm-row" },
+						react.createElement(
+							"label",
+							{ className: "dwsm-check" },
+							react.createElement("input", {
+								type: "checkbox",
+								checked: manual,
+								onChange: (event) => {
+									setManual(event.target.checked);
+									setLiveInspect(null);
+									setLiveResult(null);
+									setPlan(null);
+								},
+							}),
+							"手动迁移",
+						),
+						react.createElement(
+							"button",
+							{
+								type: "button",
+								className: "dwsm-i",
+								title: "手动迁移怎么用",
+								"aria-label": "手动迁移怎么用",
+								onClick: () => toggleRow("manualHint"),
 							},
-						}),
-						"手动迁移（只生成计划，退出 DSH 后自己执行脚本）",
+							"i",
+						),
 					),
+					expanded.manualHint === true
+						? react.createElement(
+								"div",
+								{ className: "dwsm-hint" },
+								"将生成计划，根据计划指引自行执行脚本，迁移后需重启 DSH 才能生效。",
+							)
+						: null,
 					react.createElement(
 						"div",
 						{ className: "dwsm-row" },
@@ -652,7 +762,7 @@ window.__ModuleLoader__.load({
 							Disclosure,
 							{
 								title: "Check",
-								chip: { label: passed ? "成功" : "失败", className: passed ? "dwsm-chip-ok" : "dwsm-chip-bad" },
+								chip: { label: passed ? "通过" : "失败", className: passed ? "dwsm-chip-ok" : "dwsm-chip-bad" },
 								open: rowOpen("check", liveInspect.ok !== true),
 								onToggle: () => toggleRow("check"),
 							},
@@ -795,6 +905,7 @@ window.__ModuleLoader__.load({
 			// staged manual runs, collapsed into one row
 			if (state && Array.isArray(state.runs)) {
 				const runs = state.runs.slice().reverse();
+				const unusable = runs.filter((run) => run.usable === false);
 				const rows = [];
 				if (runs.length === 0) {
 					rows.push(react.createElement("div", { className: "dwsm-sub", key: "none" }, "还没有暂存记录。勾选「手动迁移」后点「生成计划」。"));
@@ -804,21 +915,68 @@ window.__ModuleLoader__.load({
 					// runner inside is always 1-apply-migration.cmd, so the path adds nothing the
 					// button does not already give; the verify step is the second script, run after
 					// DSH is down, so a button for it here cannot be used at that point anyway.
+					//
+					// A run whose source is no longer a registered workspace can never be applied
+					// (the workspace it would migrate is gone), so it is labelled instead of silently
+					// sitting there looking actionable.
 					rows.push(
 						react.createElement(
 							"div",
 							{ className: "dwsm-item", key: run.dir },
 							react.createElement("div", { className: "dwsm-mono" }, text(run.from) + "  ->  " + text(run.to)),
 							react.createElement(
-								"button",
-								{
-									type: "button",
-									className: "dwsm-btn",
-									disabled: busy,
-									onClick: () => openDirectory("runs", run.dir),
-								},
-								"打开目录",
+								"div",
+								{ className: "dwsm-row" },
+								run.usable === false
+									? react.createElement("span", { className: "dwsm-chip dwsm-chip-warn" }, "无法使用")
+									: null,
+								react.createElement(
+									"button",
+									{
+										type: "button",
+										className: "dwsm-btn",
+										disabled: busy,
+										onClick: () => openDirectory("runs", run.dir),
+									},
+									"打开目录",
+								),
 							),
+						),
+					);
+				}
+				const runActions = [];
+				runActions.push(
+					react.createElement(
+						"button",
+						{
+							key: "i",
+							type: "button",
+							className: "dwsm-i",
+							title: "怎么用",
+							"aria-label": "怎么用",
+							onClick: (event) => {
+								event.stopPropagation();
+								toggleRow("hint");
+							},
+						},
+						"i",
+					),
+				);
+				if (unusable.length > 0) {
+					runActions.push(
+						react.createElement(
+							"button",
+							{
+								key: "prune",
+								type: "button",
+								className: "dwsm-btn",
+								disabled: busy,
+								onClick: (event) => {
+									event.stopPropagation();
+									pruneRuns();
+								},
+							},
+							"清理无法使用的暂存",
 						),
 					);
 				}
@@ -834,26 +992,14 @@ window.__ModuleLoader__.load({
 								open: expanded.runs === true,
 								onToggle: () => toggleRow("runs"),
 								// The rows are bare paths now, so the steps live behind this 「i」.
-								actions: react.createElement(
-									"button",
-									{
-										type: "button",
-										className: "dwsm-i",
-										title: "怎么用",
-										"aria-label": "怎么用",
-										onClick: (event) => {
-											event.stopPropagation();
-											toggleRow("hint");
-										},
-									},
-									"i",
-								),
+								actions: runActions,
 								hint:
 									expanded.hint === true
 										? "用法：先点「打开目录」，然后完全退出 DSH，再按顺序手动执行目录里的\n" +
 											"  1-apply-migration.cmd   （执行迁移）\n" +
 											"  2-verify.cmd            （校验，必须全 PASS）\n" +
-											"若中间报错，执行 3-rollback.cmd 回滚。"
+											"若中间报错，执行 3-rollback.cmd 回滚。\n" +
+											"迁移完成后需重启 DSH 才能生效。"
 										: null,
 								banner: noticeFor("runs"),
 							},
