@@ -493,19 +493,45 @@ window.__ModuleLoader__.load({
 				setError(null);
 				setPlan(null);
 				setVerify(null);
-				// The「方式」slider applies to the manual flow too: without this the staged script
-				// would leave the project where it is and the slider would lie.
-				callApi("/plan", { from: from.trim(), to: to.trim(), project: moveFiles ? "move" : "keep" }).then(
-					(result) => {
-						const payload = result.payload;
-						if (payload && payload.ok === true && payload.json) {
-							setPlan(payload.json);
-						} else if (payload && payload.json) {
-							setPlan(payload.json);
-						} else {
-							setError(payload && payload.error ? text(payload.error) : payload && payload.stderr ? text(payload.stderr) : "生成计划失败（HTTP " + text(result.status) + "）");
+				setLiveInspect(null);
+				setLiveResult(null);
+				/**
+				 * The same check runs first here as in the live flow — but narrowed to what holds
+				 * with DSH stopped (`projectOnly`): the source path and the destination directory.
+				 * A plan is a stop-DSH fallback, so a live-only precondition (an unavailable
+				 * registry, a running session) must not be able to block it; a destination that is
+				 * not empty must, and it does.
+				 */
+				callApi("/live-inspect", { from: from.trim(), to: to.trim(), moveProject: moveFiles, projectOnly: true }).then(
+					(checked) => {
+						const verdict = checked.payload;
+						if (!(verdict && typeof verdict.ok === "boolean")) {
+							setError(verdict && verdict.error ? text(verdict.error) : "检查失败（HTTP " + text(checked.status) + "）");
+							setBusy(false);
+							return;
 						}
-						setBusy(false);
+						setLiveInspect(verdict);
+						if (verdict.ok !== true) {
+							setBusy(false);
+							return;
+						}
+						// The「方式」slider applies to the manual flow too: without this the staged script
+						// would leave the project where it is and the slider would lie.
+						callApi("/plan", { from: from.trim(), to: to.trim(), project: moveFiles ? "move" : "keep" }).then(
+							(result) => {
+								const payload = result.payload;
+								if (payload && payload.json) {
+									setPlan(payload.json);
+								} else {
+									setError(payload && payload.error ? text(payload.error) : payload && payload.stderr ? text(payload.stderr) : "生成计划失败（HTTP " + text(result.status) + "）");
+								}
+								setBusy(false);
+							},
+							(reason) => {
+								setError(String((reason && reason.message) || reason));
+								setBusy(false);
+							},
+						);
 					},
 					(reason) => {
 						setError(String((reason && reason.message) || reason));

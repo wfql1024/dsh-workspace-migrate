@@ -867,6 +867,10 @@ function makeRoutes(ctx) {
             toPath,
             sessionIds: asStringArray(body.sessionIds),
             moveProject: body.moveProject === true,
+            // The manual/stop-DSH flow asks the same destination questions without the live-only
+            // preconditions (see inspectLiveMove): it must not be blocked by a registry it never
+            // needs.
+            projectOnly: body.projectOnly === true,
           })
           writeJson(res, 200, report)
         } catch (error) {

@@ -287,6 +287,28 @@ console.log('\n[9] the live-move routes')
   ok('live-move without confirm is refused with 409', noConfirm.status === 409, `status ${noConfirm.status}`)
   ok('the refusal explains the confirm requirement', noConfirm.payload && noConfirm.payload.refused === true && /confirm/.test(String(noConfirm.payload.reason)), JSON.stringify(noConfirm.payload))
 
+  // The manual/stop-DSH flow asks for the narrow verdict: the source path and the destination
+  // directory, nothing live. On this ctx (no workspaceRegistry at all) that must come back usable
+  // rather than reporting the missing service — the fallback route must not be blocked by a service
+  // it never needs. The full check on the SAME paths still demands the registry, which is what makes
+  // the two calls different rather than one of them merely lax.
+  const narrowRoot = path.join(os.tmpdir(), `dwsm-projectonly-${crypto.randomUUID().slice(0, 8)}`)
+  const narrowFrom = path.join(narrowRoot, 'old')
+  const narrowTo = path.join(narrowRoot, 'new')
+  fs.mkdirSync(narrowFrom, { recursive: true })
+  const narrow = await call('/api/dsh-workspace-migrate/live-inspect', {
+    method: 'POST',
+    body: { from: narrowFrom, to: narrowTo, moveProject: true, projectOnly: true },
+  })
+  ok('projectOnly answers without the registry', narrow.payload && narrow.payload.ok === true, JSON.stringify(narrow.payload && narrow.payload.blockers))
+  ok('and says the missing destination will be created', (narrow.payload?.notes ?? []).some((note) => /does not exist yet/.test(note)), JSON.stringify(narrow.payload && narrow.payload.notes))
+  const fullCheck = await call('/api/dsh-workspace-migrate/live-inspect', {
+    method: 'POST',
+    body: { from: narrowFrom, to: narrowTo, moveProject: true },
+  })
+  ok('the full check on the same paths still demands the registry', fullCheck.payload && fullCheck.payload.ok === false && /workspaceRegistry/.test(String(fullCheck.payload.blockers)), JSON.stringify(fullCheck.payload && fullCheck.payload.blockers))
+  fs.rmSync(narrowRoot, { recursive: true, force: true })
+
   const wrongMethod = await call('/api/dsh-workspace-migrate/live-move', { method: 'GET' })
   ok('GET on live-move answers 405', wrongMethod.status === 405, `status ${wrongMethod.status}`)
 }

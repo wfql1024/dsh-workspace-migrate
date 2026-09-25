@@ -571,15 +571,15 @@ console.log('\n[10] a late failure moves the project directory back')
   fs.rmSync(home.root, { recursive: true, force: true })
 }
 
-// ── moveProject refuses a destination that already exists ──────────────────
-console.log('\n[11] moveProject refuses an existing destination')
+// ── moveProject refuses a destination that is not empty ────────────────────
+console.log('\n[11] moveProject refuses a destination that is not empty')
 {
   const home = makeHome('destexists', ['session-1'])
   fs.mkdirSync(home.to, { recursive: true })
   const registry = fakeRegistry(home)
   const inspect = await inspectLiveMove(fakeServices({ registry }), { fromPath: home.from, toPath: home.to, moveProject: true })
   ok('is refused', inspect.ok === false, JSON.stringify(inspect.blockers))
-  ok('says the destination holds files', /already holds files/.test(inspect.blockers.join(' ')), JSON.stringify(inspect.blockers))
+  ok('says the destination is not empty', /is not empty/.test(inspect.blockers.join(' ')), JSON.stringify(inspect.blockers))
   ok('reports the project facts', inspect.project.sourceExists === true && inspect.project.destinationExists === true && inspect.project.willMove === true, JSON.stringify(inspect.project))
 
   const move = await withHome(home, () =>
@@ -783,16 +783,32 @@ console.log('\n[16] a real project-directory move leaves nothing behind at the s
 
   // Even if something recreates an empty original path, the undo must be able to proceed.
   fs.mkdirSync(from, { recursive: true })
-  const back = moveProjectDirectory(to, from, { replaceEmptyDestination: true })
+  const back = moveProjectDirectory(to, from)
   ok('the rollback takes over an empty destination', back.ok === true, JSON.stringify(back))
   ok('the content came back', fs.existsSync(path.join(from, 'marker.txt')))
 
-  // A destination holding anything at all is still refused, flag or no flag.
-  fs.mkdirSync(to, { recursive: true })
-  fs.writeFileSync(path.join(to, 'occupied.txt'), 'z\n')
-  const refused = moveProjectDirectory(from, to, { replaceEmptyDestination: true })
-  ok('a non-empty destination is still refused without the backup flag', refused.ok === false && /already holds files/.test(String(refused.error)), JSON.stringify(refused))
-  ok('the refused move changed nothing', fs.existsSync(path.join(from, 'marker.txt')) && fs.existsSync(path.join(to, 'occupied.txt')))
+  // An existing but EMPTY destination is accepted without any flag: that is the whole point of
+  // "empty is fine" (D21) — the user may have prepared the folder themselves.
+  const emptyDestination = path.join(root, 'prepared')
+  fs.mkdirSync(emptyDestination, { recursive: true })
+  const intoEmpty = moveProjectDirectory(from, emptyDestination)
+  ok('an existing empty destination is taken over', intoEmpty.ok === true, JSON.stringify(intoEmpty))
+  ok('the content landed in it', fs.existsSync(path.join(emptyDestination, 'marker.txt')))
+
+  // A destination holding only FOLDERS is not empty: a bare folder is content (D21).
+  const foldersOnly = path.join(root, 'foldersonly')
+  fs.mkdirSync(path.join(foldersOnly, 'an-empty-folder'), { recursive: true })
+  const refusedFolders = moveProjectDirectory(emptyDestination, foldersOnly)
+  ok('a destination holding only folders is refused', refusedFolders.ok === false, JSON.stringify(refusedFolders))
+  ok('and the refusal says it is not empty', /is not empty/.test(String(refusedFolders.error)), String(refusedFolders.error))
+
+  // A destination holding anything else is refused too, and nothing is touched.
+  const occupied = path.join(root, 'occupied')
+  fs.mkdirSync(occupied, { recursive: true })
+  fs.writeFileSync(path.join(occupied, 'occupied.txt'), 'z\n')
+  const refused = moveProjectDirectory(emptyDestination, occupied)
+  ok('a non-empty destination is refused', refused.ok === false && /is not empty/.test(String(refused.error)), JSON.stringify(refused))
+  ok('the refused move changed nothing', fs.existsSync(path.join(emptyDestination, 'marker.txt')) && fs.existsSync(path.join(occupied, 'occupied.txt')))
   fs.rmSync(root, { recursive: true, force: true })
 }
 
@@ -861,8 +877,8 @@ console.log('\n[18] two records claiming the destination is refused')
   fs.rmSync(home.root, { recursive: true, force: true })
 }
 
-// ── a destination that already holds files is never taken over ─────────────
-console.log('\n[19] a destination that holds files fails the check and is left untouched')
+// ── a destination that already holds anything is never taken over ──────────
+console.log('\n[19] a destination that is not empty fails the check and is left untouched')
 {
   const home = makeHome('occupied', ['session-1'])
   // `makeHome` writes readme.txt into both sides, so the destination has content already.
@@ -870,9 +886,9 @@ console.log('\n[19] a destination that holds files fails the check and is left u
   const services = fakeServices({ registry, sessionsRoot: home.sessionsRoot, cwdBySession: { 'session-1': home.from } })
 
   const refused = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to, moveProject: true })
-  ok('moving the files into a destination that holds files fails the check', refused.ok === false, JSON.stringify(refused))
+  ok('moving the files into a destination that is not empty fails the check', refused.ok === false, JSON.stringify(refused))
   ok('the Check output names the directory', refused.blockers.join(' ').includes(home.to), JSON.stringify(refused.blockers))
-  ok('and says it is not empty', /already holds files/.test(refused.blockers.join(' ')), JSON.stringify(refused.blockers))
+  ok('and says it is not empty', /is not empty/.test(refused.blockers.join(' ')), JSON.stringify(refused.blockers))
   ok('it offers both ways forward', /empty it yourself/.test(refused.blockers.join(' ')) && /only change the path/.test(refused.blockers.join(' ')), JSON.stringify(refused.blockers))
   ok('nothing is promised about backing it up', !/back ?up|Desktop|parked/i.test([...refused.blockers, ...refused.notes].join(' ')), JSON.stringify([...refused.blockers, ...refused.notes]))
 
@@ -887,6 +903,54 @@ console.log('\n[19] a destination that holds files fails the check and is left u
   // workspace simply starts pointing at a directory that has content of its own.
   const keep = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to })
   ok('「仅修改目录」accepts the very same destination', keep.ok === true, JSON.stringify(keep.blockers))
+  fs.rmSync(home.root, { recursive: true, force: true })
+}
+
+// ── a destination holding only FOLDERS counts as content ───────────────────
+//
+// Reported by the user: a destination whose top level held only an (empty) folder was accepted and
+// then merged into. A bare folder is content — some projects use one as a marker — so the rule is
+// "the top-level listing must be empty", not "there must be no files".
+console.log('\n[19b] a destination holding only folders is not empty')
+{
+  const home = makeHome('foldersonly', ['session-1'], { destinationExists: false })
+  fs.mkdirSync(path.join(home.to, 'a-marker-folder'), { recursive: true })
+  fs.mkdirSync(path.join(home.to, 'another', 'nested'), { recursive: true })
+  const registry = fakeRegistry(home)
+  const services = fakeServices({ registry, sessionsRoot: home.sessionsRoot, cwdBySession: { 'session-1': home.from } })
+
+  const refused = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to, moveProject: true })
+  ok('a folder-only destination fails the check', refused.ok === false, JSON.stringify(refused.blockers))
+  ok('it is reported as not empty', /is not empty/.test(refused.blockers.join(' ')), JSON.stringify(refused.blockers))
+
+  const move = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to, moveProject: true }))
+  ok('the move is refused before touching anything', move.ok === false && move.stage === 'precondition', JSON.stringify(move.stage))
+  ok('the folders are still the only thing there', fs.readdirSync(home.to).sort().join(',') === 'a-marker-folder,another', JSON.stringify(fs.readdirSync(home.to)))
+  ok('the source is untouched', fs.readFileSync(path.join(home.from, 'readme.txt'), 'utf8') === 'x\n')
+  fs.rmSync(home.root, { recursive: true, force: true })
+}
+
+// ── an existing but EMPTY destination is accepted and used ─────────────────
+//
+// Reported by the user: the check passed an existing empty destination, then the move refused it at
+// the project layer ("the destination already exists"). A folder the user prepared is exactly what
+// "empty is fine" means — and the same rule must hold for the rollback's empty husk.
+console.log('\n[19c] an existing empty destination is taken over by a live move')
+{
+  const home = makeHome('emptydest', ['session-1'], { destinationExists: false })
+  fs.mkdirSync(home.to, { recursive: true })
+  const registry = fakeRegistry(home)
+  const services = fakeServices({ registry, sessionsRoot: home.sessionsRoot, cwdBySession: { 'session-1': home.from } })
+
+  const inspect = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to, moveProject: true })
+  ok('the check passes', inspect.ok === true, JSON.stringify(inspect.blockers))
+  ok('and says the destination is usable', inspect.notes.some((note) => /exists and is empty/.test(note)), JSON.stringify(inspect.notes))
+
+  const result = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to, moveProject: true }))
+  ok('the move succeeds', result.ok === true, JSON.stringify(result.blockers ?? result))
+  ok('the project content is at the destination', fs.readFileSync(path.join(home.to, 'readme.txt'), 'utf8') === 'x\n')
+  ok('the source path is gone', !fs.existsSync(home.from))
+  ok('the session moved to the new projectKey', fs.existsSync(path.join(home.sessionsRoot, projectKeyOf(home.to), 'session-1', 'session.v3.jsonl.zstd')))
   fs.rmSync(home.root, { recursive: true, force: true })
 }
 

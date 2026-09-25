@@ -125,6 +125,15 @@ const PANEL_HOOKS = [
 
 /** Render `Panel` with selected hook slots pre-set. */
 async function renderPanelWith(overrides) {
+	return render(await panelTreeWith(overrides))
+}
+
+/**
+ * Seed `Panel` and hand back its element tree (unrendered), so a test can reach a handler rather
+ * than only the markup. `render()` drops functions, and the action buttons are the only way to test
+ * "the check gates the plan" as behaviour instead of as a shape.
+ */
+async function panelTreeWith(overrides) {
 	// Slot 0 is the dialog state the panel reads (`useDialog()`), the rest mirror Panel's own
 	// `useState` defaults. `open: true` keeps every section rendered.
 	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, false, true, null, null, {}, null]
@@ -143,6 +152,45 @@ async function renderPanelWith(overrides) {
 		if (typeof cleanup === 'function') cleanup()
 	}
 	for (let i = 0; i < 10; i++) await Promise.resolve()
+	cursor = 0
+	pendingEffects = []
+	return react.createElement(PanelComponent, {})
+}
+
+/** Find the props of the first `<button>` whose only child is exactly `label`. */
+function findButton(node, label) {
+	if (node === null || node === undefined || node === false || node === true) return null
+	if (Array.isArray(node)) {
+		for (const child of node) {
+			const hit = findButton(child, label)
+			if (hit !== null) return hit
+		}
+		return null
+	}
+	if (typeof node !== 'object' || node.$$element !== true) return null
+	const props = { ...node.props }
+	if (node.children.length > 0) props.children = node.children.length === 1 ? node.children[0] : node.children
+	if (typeof node.type === 'function') return findButton(node.type(props), label)
+	if (node.type === 'button' && props.children === label && typeof props.onClick === 'function') return props
+	for (const child of node.children) {
+		const hit = findButton(child, label)
+		if (hit !== null) return hit
+	}
+	return null
+}
+
+/**
+ * Click the action button labelled `label` and return the resulting markup. The hook cursor is
+ * reset first because walking the tree invokes `Panel` again — the same order `render()` uses, so
+ * the seeded slots line up.
+ */
+async function clickPanelButton(overrides, label) {
+	const tree = await panelTreeWith(overrides)
+	cursor = 0
+	const button = findButton(tree, label)
+	if (button === null) throw new Error(`no button labelled ${label} in the panel`)
+	button.onClick()
+	for (let i = 0; i < 12; i++) await Promise.resolve()
 	cursor = 0
 	pendingEffects = []
 	return render(react.createElement(PanelComponent, {}))
@@ -172,14 +220,26 @@ globalThis.document = {
 	},
 }
 const fetchCalls = []
+/**
+ * Answers for the two routes the action buttons drive. A test sets them right before clicking, so
+ * a click can be observed end to end: which route was asked FIRST and what the panel did with the
+ * verdict. Both default to a refusal rather than a fake success — an unset reply must never look
+ * like a passing check.
+ */
+let inspectReply = null
+let planReply = null
+let moveReply = null
 globalThis.fetch = async (url, options) => {
-	fetchCalls.push({ url, method: (options && options.method) || 'GET' })
+	fetchCalls.push({ url, method: (options && options.method) || 'GET', body: options && options.body })
 	if (url.endsWith('/session')) {
 		return {
 			status: 200,
 			json: async () => ({ ok: true, sessionId: 'session-from-props', cwd: 'D:/old/DemoProject', workspaceId: 'w1', workspaceTitle: 'DemoProject', source: 'projcache-session' }),
 		}
 	}
+	if (url.endsWith('/live-inspect')) return { status: 200, json: async () => inspectReply ?? { ok: false, error: 'no inspectReply was set for this test' } }
+	if (url.endsWith('/plan')) return { status: 200, json: async () => planReply ?? { ok: false, error: 'no planReply was set for this test' } }
+	if (url.endsWith('/live-move')) return { status: 200, json: async () => moveReply ?? { ok: false, error: 'no moveReply was set for this test' } }
 	const body = {
 		ok: true,
 		dshHome: 'C:/Users/probe/.dsh',
@@ -536,6 +596,57 @@ console.log('\n[7] signal markers in the result dialog')
 	})
 	ok('a failed open is reported the same way', planNotice.includes('[×] 宿主半体还是旧版本'), 'a stale host must be named at the click site')
 	ok('a notice only appears on its own row', !notice.includes('宿主半体还是旧版本'), 'notices must not leak across rows')
+}
+
+// ── the manual flow checks the destination before it writes a plan ─────────
+console.log('\n[12] manual mode runs the check first and is gated by it')
+{
+	const routes = () => fetchCalls.map((entry) => entry.url.replace('/api/dsh-workspace-migrate', '')).filter((route) => route !== '/state' && route !== '/session')
+	const bodyOf = (route) => {
+		const entry = [...fetchCalls].reverse().find((call) => call.url.endsWith(route))
+		return entry === undefined || typeof entry.body !== 'string' ? {} : JSON.parse(entry.body)
+	}
+
+	// A passing check: the check is asked FIRST, narrowed to what holds with DSH stopped, and only
+	// then is the plan written.
+	fetchCalls.length = 0
+	inspectReply = { ok: true, blockers: [], notes: ['[i] the destination is empty'], project: { willMove: true, sourceExists: true, destinationExists: true, destinationHasContent: false }, sessionIds: [], liveIds: [], projectOnly: true }
+	planReply = { ok: true, json: { ok: true, oldKey: '--a--', newKey: '--b--', sessions: { toMigrate: [{}], foreign: [], alreadyAtNew: [] }, metadata: { patches: [] }, project: { action: 'move' }, running: { dshProcesses: [] }, warnings: [], errors: [], stage: { dir: 'C:/Users/probe/.dsh/migration-runs/run-2', planFile: 'p', applyCmd: 'a', verifyCmd: 'v', rollbackCmd: 'r' } } }
+	const okPlan = await clickPanelButton({ manual: true, from: 'D:/old/DemoProject', to: 'E:/new/DemoProject' }, '生成计划')
+	ok('the manual action asks the check before the plan', routes().join(' -> ') === '/live-inspect -> /plan', routes().join(' -> '))
+	ok('and it asks for the project-only check', bodyOf('/live-inspect').projectOnly === true, JSON.stringify(bodyOf('/live-inspect')))
+	ok('the check is told whether the files move too', bodyOf('/live-inspect').moveProject === true, JSON.stringify(bodyOf('/live-inspect')))
+	ok('a passing check is shown as its own row', okPlan.includes('dwsm-disc-title">Check<') && okPlan.includes('dwsm-chip-ok">通过<'), okPlan.slice(0, 200))
+	ok('a passing check still produces the plan', okPlan.includes('dwsm-disc-title">Plan<'), okPlan.slice(0, 300))
+
+	// A destination that is not empty: the plan must NOT be written at all.
+	fetchCalls.length = 0
+	inspectReply = { ok: false, blockers: ['the destination is not empty: E:/new/DemoProject — empty it yourself, or choose "only change the path" if the workspace should simply point there'], notes: [], project: { willMove: true, sourceExists: true, destinationExists: true, destinationHasContent: true }, sessionIds: [], projectOnly: true }
+	planReply = null
+	const refused = await clickPanelButton({ manual: true, from: 'D:/old/DemoProject', to: 'E:/new/DemoProject' }, '生成计划')
+	ok('a refused check stops the manual flow before the plan', !routes().includes('/plan'), routes().join(' -> '))
+	ok('the refusal is shown in the Check row', refused.includes('[×] 检查未通过') && refused.includes('the destination is not empty'), refused.slice(0, 300))
+	ok('and no plan row appears', !refused.includes('dwsm-disc-title">Plan<'), refused.slice(0, 300))
+
+	// Moving the files is what makes a populated destination fatal; with「仅修改目录」the same
+	// click must still generate its plan (the check is asked with moveProject:false).
+	fetchCalls.length = 0
+	inspectReply = { ok: true, blockers: [], notes: [], project: { willMove: false, sourceExists: true, destinationExists: true, destinationHasContent: true }, sessionIds: [], projectOnly: true }
+	planReply = { ok: true, json: { ok: true, oldKey: '--a--', newKey: '--b--', sessions: { toMigrate: [{}], foreign: [], alreadyAtNew: [] }, metadata: { patches: [] }, project: { action: 'keep' }, running: { dshProcesses: [] }, warnings: [], errors: [], stage: { dir: 'C:/Users/probe/.dsh/migration-runs/run-3', planFile: 'p', applyCmd: 'a', verifyCmd: 'v', rollbackCmd: 'r' } } }
+	const keepPlan = await clickPanelButton({ manual: true, moveFiles: false, from: 'D:/old/DemoProject', to: 'E:/new/DemoProject' }, '生成计划')
+	ok('「仅修改目录」asks the check with moveProject off', bodyOf('/live-inspect').moveProject === false, JSON.stringify(bodyOf('/live-inspect')))
+	ok('and the plan is still written', keepPlan.includes('dwsm-disc-title">Plan<'), keepPlan.slice(0, 300))
+
+	// The live flow's own gate, for contrast: the same click on「开始迁移」asks the FULL check.
+	fetchCalls.length = 0
+	inspectReply = { ok: true, blockers: [], notes: [], project: { willMove: true, sourceExists: true, destinationExists: true, destinationHasContent: false }, sessionIds: ['session-a'], liveIds: [] }
+	moveReply = { ok: true, from: 'D:/old/DemoProject', to: 'E:/new/DemoProject', sessionIds: ['session-a'], movedCount: 1, workspaceTitle: 'DemoProject', workspaceCreated: false, projectMoved: true, notes: [] }
+	await clickPanelButton({ from: 'D:/old/DemoProject', to: 'E:/new/DemoProject' }, '开始迁移')
+	ok('the live action asks the full check, not the project-only one', bodyOf('/live-inspect').projectOnly !== true, JSON.stringify(bodyOf('/live-inspect')))
+	ok('and then performs the move', routes().includes('/live-move'), routes().join(' -> '))
+	inspectReply = null
+	planReply = null
+	moveReply = null
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

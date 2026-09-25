@@ -189,3 +189,33 @@ livetest [12]（`keep` 创建目标目录并写入注册）、[12b]（盘不存�
 于是 `lib/live-move.mjs` 一直带着 `MUTATION: writer header left at the destination`；下一轮只报 `livetest 177/178`，
 看上去像真实回归（差点去查一个不存在的 bug）。现在 `run-mutations.mjs` 开工前先检查残留
 （`.mutbak` 还在、或文件里仍留着 `MUTATION:` 串），命中就以退出码 2 明确指出来。
+（第二次超时杀进程时又踩了同一个坑，这次是守卫先报出来的 —— 说明它有用。）
+
+## 2026-09-25 下午 — 用户实测：手动太宽松、自动太严格
+
+用户上手测了 D20 那一版，报回两条，并给出统一标准（不存在 → 自动创建；空 → 可以；非空 → 不允许）：
+
+1. **手动迁移 + 目标目录下只有文件夹 ⇒ 却被判通过**（太宽松，真会合并）。
+   **根因**：`buildPlan` 用 `directoryStats(to).files > 0` 判"有没有内容"，而它**递归数文件** ——
+   只放空文件夹的目标 `files === 0` ⇒ 计划放行，`apply` 的二次校验用的也是同一条 ⇒ 合并进去。
+2. **自动迁移 + 目标目录已存在但为空 ⇒ 迁移被拒**（太严格）。
+   **根因**：`inspectLiveMove` 用的是 `readdirSync().length === 0`（本来就对，所以 `Check` 通过），
+   但 layer 1 的 `moveProjectDirectory(from, to)` 没带 `replaceEmptyDestination`（那个开关当时只有撤销会用），
+   于是 `occupied || !replaceEmptyDestination` 对"已存在但空"直接返回 `the destination already exists` ——
+   **检查说可以、执行却拒绝**。
+
+**修复**（D21）：引擎新增 `readEntries`/`describeEntries`，"空"= 顶层没有任何条目（文件夹也算），
+`buildPlan` 与 `applyPlan` 二次校验都改用它，错误文案带上项数与条目名；
+`moveProjectDirectory` 正反两个方向统一（空目标一律接管，`replaceEmptyDestination` 开关删除）；
+手动模式点「生成计划」先走 `projectOnly` 的检查，不通过就不生成计划。
+
+**验证**：selftest [Test M]（文件与文件夹两种非空、条目计数、目标原样未动）、[Test M2]（空目标可通过并真的搬进去、
+缺失目标由搬迁创建、keep 的缺失目标仍由 apply 创建、缺盘仍拒）；
+livetest [16]（空目标被接管、只有文件夹被拒）、[19]（非空拒绝且按字节未动）、
+[19b]（只有文件夹 ⇒ 拒绝）、[19c]（空目标 ⇒ 迁移成功）、[20]（失败后撤销创建的空目录）；
+clienttest [12]（手动先 Check、失败不生成计划、keep 走 `moveProject:false`、实时迁移仍是完整检查）；
+hosttest [9]（`projectOnly` 在没有 registry 的宿主上也答得出来，而同一对路径的完整检查仍然要求 registry）；
+变异 `engine-counts-files-only` / `live-destination-entries-not-folders` /
+`live-refuses-empty-destination` / `manual-skips-check` / `destination-content-allowed` /
+`live-destination-content-allowed` 必须让对应套件变红。
+测试基线：hosttest 88、clienttest 111、livetest 193、selftest 172 = **564 项断言 / 24 个变异**（24/24 全部被抓住）。

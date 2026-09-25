@@ -645,7 +645,7 @@ console.log('\n[Test L] a plan remembers where DSH was serving, and the guard pr
   ok('and the guard still answers 0 or 1', silent.code === 0 || silent.code === 1, `exit ${silent.code}`)
 }
 
-// ── Test M: moving the files into a destination that holds files ────────────
+// ── Test M: moving the files into a destination that is not empty ───────────
 console.log('\n[Test M] a non-empty destination fails the check and is left exactly as it was')
 {
   const root = freshRoot('M')
@@ -658,8 +658,9 @@ console.log('\n[Test M] a non-empty destination fails the check and is left exac
 
   const plan = run(['plan', '--from', env.from, '--to', env.to, '--project', 'move', ...base])
   ok('the plan is refused', plan.json?.ok === false, JSON.stringify(plan.json?.errors))
-  ok('and it names the reason', JSON.stringify(plan.json?.errors ?? []).includes('already holds'), JSON.stringify(plan.json?.errors))
+  ok('and it names the reason', JSON.stringify(plan.json?.errors ?? []).includes('is not empty'), JSON.stringify(plan.json?.errors))
   ok('it names the directory', (plan.json?.errors ?? []).some((error) => error.includes(env.to)), JSON.stringify(plan.json?.errors))
+  ok('it counts what is in the way', (plan.json?.errors ?? []).some((error) => /1 item\(s\): 1 file\(s\)/.test(error)), JSON.stringify(plan.json?.errors))
   ok('it offers emptying it or only changing the path', (plan.json?.errors ?? []).some((error) => /empty it yourself/.test(error) && /only change the path/.test(error)), JSON.stringify(plan.json?.errors))
   ok('it promises nothing about a backup', !/back ?up|Desktop|parked/i.test(JSON.stringify(plan.json?.errors ?? [])), JSON.stringify(plan.json?.errors))
   ok('the staged plan carries the refusal', (() => {
@@ -672,6 +673,17 @@ console.log('\n[Test M] a non-empty destination fails the check and is left exac
   // The same destination is fine for "only change the path": nothing is copied over it.
   const keep = run(['plan', '--from', env.from, '--to', env.to, '--project', 'keep', ...base])
   ok('the same destination is accepted by --project keep', keep.json?.ok === true, JSON.stringify(keep.json?.errors))
+
+  // A destination holding only FOLDERS is not empty either — a bare folder is content (D21), and
+  // counting files alone is how a merge slipped through (user report 2026-09-25).
+  const folderRoot = freshRoot('M-folders')
+  const folderEnv = scenario(folderRoot, { sessions: [{ id: 'session-ffffffff-3333-3333-3333-333333333333', versions: [3] }] })
+  fs.mkdirSync(path.join(folderEnv.to, 'an-empty-folder'), { recursive: true })
+  fs.mkdirSync(path.join(folderEnv.to, 'outer', 'inner'), { recursive: true })
+  const foldersOnly = run(['plan', '--from', folderEnv.from, '--to', folderEnv.to, '--project', 'move', '--dsh-home', folderEnv.dshHome, '--json'])
+  ok('a folder-only destination is refused', foldersOnly.json?.ok === false, JSON.stringify(foldersOnly.json?.errors))
+  ok('and the message counts folders, not files', (foldersOnly.json?.errors ?? []).some((error) => /2 item\(s\): 2 folder\(s\)/.test(error)), JSON.stringify(foldersOnly.json?.errors))
+  ok('the folders are untouched', fs.readdirSync(folderEnv.to).sort().join(',') === 'an-empty-folder,outer', JSON.stringify(fs.readdirSync(folderEnv.to)))
 }
 
 // ── Test M2: an empty or missing destination for a project move ─────────────
@@ -681,26 +693,45 @@ console.log('\n[Test M2] an empty destination is fine; "only change the path" cr
   const env = scenario(root, { sessions: [{ id: 'session-ffffffff-2222-2222-2222-222222222222', versions: [3] }] })
   const base = ['--dsh-home', env.dshHome, '--json']
 
-  // An existing but empty destination: the move may use it.
+  // An existing but EMPTY destination: the move may use it, and the plan says nothing is in the way.
   fs.mkdirSync(env.to, { recursive: true })
   const intoEmpty = run(['plan', '--from', env.from, '--to', env.to, '--project', 'move', ...base])
   ok('an empty destination is accepted', intoEmpty.json?.ok === true, JSON.stringify(intoEmpty.json?.errors))
+  ok('nothing is reported as content', intoEmpty.json?.project?.destinationHasContent === false, JSON.stringify(intoEmpty.json?.project))
+  const moveIn = run(['apply', '--plan', intoEmpty.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('apply into the empty destination exits 0', moveIn.code === 0, moveIn.json?.error ?? moveIn.stderr.trim())
+  ok('the project body is now there', fs.existsSync(path.join(env.to, 'src', 'nested', 'a.txt')))
+  ok('the source project directory is gone', !fs.existsSync(env.from))
+
+  // A missing destination for a project move: the move itself creates it. Reported here rather than
+  // silently, so the plan and the live check say the same thing.
+  const root2 = freshRoot('M2b')
+  const env2 = scenario(root2, { sessions: [{ id: 'session-ffffffff-4444-4444-4444-444444444444', versions: [3] }] })
+  const missingMoveTo = path.join(root2, 'brand', 'new', 'Placed')
+  const movePlan = run(['plan', '--from', env2.from, '--to', missingMoveTo, '--project', 'move', '--dsh-home', env2.dshHome, '--json'])
+  ok('a missing destination is accepted for a move', movePlan.json?.ok === true, JSON.stringify(movePlan.json?.errors))
+  ok('and the plan says the move creates it', (movePlan.json?.warnings ?? []).some((w) => /does not exist yet; the move creates it/.test(w)), JSON.stringify(movePlan.json?.warnings))
+  const moveApply = run(['apply', '--plan', movePlan.json.stage.planFile, '--yes', '--allow-running', '--dsh-home', env2.dshHome, '--json'])
+  ok('apply exits 0', moveApply.code === 0, moveApply.json?.error ?? moveApply.stderr.trim())
+  ok('the destination was created by the move', fs.existsSync(path.join(missingMoveTo, 'src', 'nested', 'a.txt')), missingMoveTo)
 
   // A missing destination for "only change the path": the plan says it will be created, and apply
   // creates exactly that one empty directory.
-  const missingTo = path.join(root, 'brand', 'new', 'Place')
-  const keep = run(['plan', '--from', env.from, '--to', missingTo, '--project', 'keep', ...base])
+  const root3 = freshRoot('M2c')
+  const env3 = scenario(root3, { sessions: [{ id: 'session-ffffffff-5555-5555-5555-555555555555', versions: [3] }] })
+  const missingTo = path.join(root3, 'brand', 'new', 'Place')
+  const keep = run(['plan', '--from', env3.from, '--to', missingTo, '--project', 'keep', '--dsh-home', env3.dshHome, '--json'])
   ok('a missing destination is accepted', keep.json?.ok === true, JSON.stringify(keep.json?.errors))
   ok('the plan marks it for creation', keep.json?.project?.createDestination === true, JSON.stringify(keep.json?.project))
   ok('and says so in the warnings', (keep.json?.warnings ?? []).some((w) => /does not exist yet; apply creates it/.test(w)), JSON.stringify(keep.json?.warnings))
   ok('nothing was created at plan time', !fs.existsSync(missingTo))
 
-  const apply = run(['apply', '--plan', keep.json.stage.planFile, '--yes', '--allow-running', ...base])
+  const apply = run(['apply', '--plan', keep.json.stage.planFile, '--yes', '--allow-running', '--dsh-home', env3.dshHome, '--json'])
   ok('apply exits 0', apply.code === 0, apply.json?.error ?? apply.stderr.trim())
   ok('the destination directory now exists', fs.existsSync(missingTo) && fs.statSync(missingTo).isDirectory(), missingTo)
   ok('it is empty', fs.readdirSync(missingTo).length === 0, JSON.stringify(fs.readdirSync(missingTo)))
-  ok('the source project was not touched', fs.existsSync(path.join(env.from, 'src', 'nested', 'a.txt')))
-  const verify = run(['verify', '--plan', keep.json.stage.planFile, ...base])
+  ok('the source project was not touched', fs.existsSync(path.join(env3.from, 'src', 'nested', 'a.txt')))
+  const verify = run(['verify', '--plan', keep.json.stage.planFile, '--dsh-home', env3.dshHome, '--json'])
   ok('verify passes', verify.json?.ok === true, JSON.stringify(verify.json?.failures))
 
   // A path on a drive that is not there is refused rather than attempted.
@@ -708,7 +739,7 @@ console.log('\n[Test M2] an empty destination is fine; "only change the path" cr
   if (missingDrive === undefined) {
     console.log('  (skipped: no absent drive letter to test with)')
   } else {
-    const impossible = run(['plan', '--from', env.from, '--to', path.join(missingDrive, 'nope', 'Place'), '--project', 'keep', ...base])
+    const impossible = run(['plan', '--from', env3.from, '--to', path.join(missingDrive, 'nope', 'Place'), '--project', 'keep', '--dsh-home', env3.dshHome, '--json'])
     ok('a destination on a missing drive is still refused', impossible.json?.ok === false, JSON.stringify(impossible.json?.errors))
   }
 }
