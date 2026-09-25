@@ -117,7 +117,6 @@ const PANEL_HOOKS = [
 	'prefilled',
 	'manual',
 	'moveFiles',
-	'backupTarget',
 	'liveInspect',
 	'liveResult',
 	'expanded',
@@ -128,7 +127,7 @@ const PANEL_HOOKS = [
 async function renderPanelWith(overrides) {
 	// Slot 0 is the dialog state the panel reads (`useDialog()`), the rest mirror Panel's own
 	// `useState` defaults. `open: true` keeps every section rendered.
-	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, false, true, false, null, null, {}, null]
+	cells = [{ open: true, sessionId: null }, null, null, false, '', '', null, null, null, false, true, null, null, {}, null]
 	for (const [name, value] of Object.entries(overrides)) {
 		const slot = PANEL_HOOKS.indexOf(name)
 		if (slot === -1) throw new Error(`unknown panel hook: ${name}`)
@@ -325,7 +324,7 @@ ok('the panel no longer prints the home directory or the engine path', !panelHtm
 ok('the manual-flow explanation lives behind an「i」, not in the label', !panelHtml.includes('手动迁移（') && /dwsm-i[^>]*>i</.test(panelHtml), 'the checkbox label must be just「手动迁移」')
 ok('「从」is picker-only', panelHtml.includes('readOnly'), 'the source path must come from the workspace picker')
 ok('the destination choice is a two-option slider, files first', panelHtml.includes('连同文件迁移') && panelHtml.includes('仅修改目录') && /dwsm-mode-on">连同文件迁移/.test(panelHtml), '「连同文件迁移」must be the default')
-ok('「自动备份目标并覆盖」is offered next to the slider', panelHtml.includes('自动备份目标并覆盖'), 'the overwrite-with-backup option must exist')
+ok('no「自动备份目标并覆盖」option is offered', !panelHtml.includes('自动备份') && !panelHtml.includes('备份目标'), 'nothing may be parked or overwritten: a non-empty destination fails the check')
 ok('no crash placeholder leaked into the markup', !panelHtml.includes('undefined'))
 
 console.log('\n[5] entries')

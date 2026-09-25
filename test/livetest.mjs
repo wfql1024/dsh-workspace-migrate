@@ -591,20 +591,45 @@ console.log('\n[11] moveProject refuses an existing destination')
   fs.rmSync(home.root, { recursive: true, force: true })
 }
 
-// ── a destination that neither exists nor is registered ────────────────────
-console.log('\n[12] a missing, unregistered destination is named, not thrown at')
+// ── 仅修改目录 into a destination that does not exist yet ──────────────────
+console.log('\n[12] 「仅修改目录」creates a missing destination instead of refusing')
 {
   const home = makeHome('nodest', ['session-1'], { destinationExists: false })
   const registry = fakeRegistry(home)
-  // `home.to` deliberately does not exist on disk, and moveProject is off.
-  const inspect = await inspectLiveMove(fakeServices({ registry }), { fromPath: home.from, toPath: home.to })
-  ok('is refused', inspect.ok === false, JSON.stringify(inspect.blockers))
-  ok('explains the destination is neither on disk nor registered', /neither exists on disk nor is a registered workspace/.test(inspect.blockers.join(' ')), JSON.stringify(inspect.blockers))
-  ok('suggests the two ways forward', /move it yourself|turn on the option/.test(inspect.blockers.join(' ')))
+  const services = fakeServices({ registry, sessionsRoot: home.sessionsRoot, cwdBySession: { 'session-1': home.from } })
 
-  // With moveProject on, the same destination is fine: the move creates it.
-  const moving = await inspectLiveMove(fakeServices({ registry }), { fromPath: home.from, toPath: home.to, moveProject: true })
-  ok('moveProject makes the same destination acceptable', moving.ok === true, JSON.stringify(moving.blockers))
+  // `home.to` deliberately does not exist on disk, and moveProject is off: nothing is copied,
+  // but the workspace still has to point at a real directory, so the move creates an empty one.
+  const inspect = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to })
+  ok('is allowed', inspect.ok === true, JSON.stringify(inspect.blockers))
+  ok('is reported as "to be created"', inspect.project.createDestination === true, JSON.stringify(inspect.project))
+  ok('the check says so before anything happens', inspect.notes.some((note) => /does not exist yet; it will be created/.test(note)), JSON.stringify(inspect.notes))
+
+  const result = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to }))
+  ok('the move succeeds', result.ok === true, JSON.stringify(result.blockers ?? result))
+  ok('the destination directory now exists', fs.existsSync(home.to) && fs.statSync(home.to).isDirectory(), home.to)
+  ok('it is empty, because only the path changed', fs.existsSync(home.to) && fs.readdirSync(home.to).length === 0, JSON.stringify(fs.existsSync(home.to) ? fs.readdirSync(home.to) : null))
+  ok('the source project is untouched', fs.readFileSync(path.join(home.from, 'readme.txt'), 'utf8') === 'x\n')
+  ok('the report says the directory was created', result.destinationCreated === true, JSON.stringify(result.destinationCreated))
+  ok('the workspace is registered at the new path', registry.entities.some((entity) => entity.path === home.to), JSON.stringify(registry.entities.map((entity) => entity.path)))
+  ok('the session artifact moved to the new projectKey', fs.existsSync(path.join(home.sessionsRoot, projectKeyOf(home.to), 'session-1', 'session.v3.jsonl.zstd')))
+  ok('the old artifact is gone', !fs.existsSync(path.join(home.oldKeyDir, 'session-1')))
+  fs.rmSync(home.root, { recursive: true, force: true })
+}
+
+// ── a destination on a drive that does not exist ───────────────────────────
+console.log('\n[12b] a destination whose drive does not exist is named at check time')
+{
+  const home = makeHome('nodrive', ['session-1'], { destinationExists: false })
+  const missingDrive = ['A:\\', 'B:\\'].find((root) => !fs.existsSync(root))
+  if (missingDrive === undefined) {
+    console.log('  (skipped: no absent drive letter to test with)')
+  } else {
+    const target = path.join(missingDrive, 'dsh-workspace-migrate-nodrive', 'Demo')
+    const inspect = await inspectLiveMove(fakeServices({ registry: fakeRegistry(home) }), { fromPath: home.from, toPath: target })
+    ok('the check refuses it', inspect.ok === false, JSON.stringify(inspect.blockers))
+    ok('and names the missing drive', /drive does not exist/.test(inspect.blockers.join(' ')), JSON.stringify(inspect.blockers))
+  }
   fs.rmSync(home.root, { recursive: true, force: true })
 }
 
@@ -836,67 +861,52 @@ console.log('\n[18] two records claiming the destination is refused')
   fs.rmSync(home.root, { recursive: true, force: true })
 }
 
-// ── a destination that already holds files: park it, then overwrite ────────
-console.log('\n[19] a non-empty destination is parked on the Desktop, then overwritten')
+// ── a destination that already holds files is never taken over ─────────────
+console.log('\n[19] a destination that holds files fails the check and is left untouched')
 {
-  const home = makeHome('backup', ['session-1'])
+  const home = makeHome('occupied', ['session-1'])
   // `makeHome` writes readme.txt into both sides, so the destination has content already.
-  const fakeHome = path.join(home.root, 'fake-user')
-  const fakeDesktop = path.join(fakeHome, 'Desktop')
-  fs.mkdirSync(fakeDesktop, { recursive: true })
-  const previousProfile = process.env.USERPROFILE
-  process.env.USERPROFILE = fakeHome
-  try {
-    const registry = fakeRegistry(home)
-    const services = fakeServices({ registry, sessionsRoot: home.sessionsRoot, cwdBySession: { 'session-1': home.from } })
+  const registry = fakeRegistry(home)
+  const services = fakeServices({ registry, sessionsRoot: home.sessionsRoot, cwdBySession: { 'session-1': home.from } })
 
-    const refused = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to, moveProject: true })
-    ok('without the flag a destination that holds files is refused', refused.ok === false && /already holds files/.test(refused.blockers.join(' ')), JSON.stringify(refused.blockers))
+  const refused = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to, moveProject: true })
+  ok('moving the files into a destination that holds files fails the check', refused.ok === false, JSON.stringify(refused))
+  ok('the Check output names the directory', refused.blockers.join(' ').includes(home.to), JSON.stringify(refused.blockers))
+  ok('and says it is not empty', /already holds files/.test(refused.blockers.join(' ')), JSON.stringify(refused.blockers))
+  ok('it offers both ways forward', /empty it yourself/.test(refused.blockers.join(' ')) && /only change the path/.test(refused.blockers.join(' ')), JSON.stringify(refused.blockers))
+  ok('nothing is promised about backing it up', !/back ?up|Desktop|parked/i.test([...refused.blockers, ...refused.notes].join(' ')), JSON.stringify([...refused.blockers, ...refused.notes]))
 
-    const allowed = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to, moveProject: true, backupTarget: true })
-    ok('with the flag the same move is allowed', allowed.ok === true, JSON.stringify(allowed.blockers))
-    ok('and it says where the old files will go', allowed.notes.some((note) => /parked on your Desktop/.test(note)), JSON.stringify(allowed.notes))
+  const move = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to, moveProject: true }))
+  ok('the move itself is refused in the precondition stage', move.ok === false && move.stage === 'precondition', JSON.stringify(move.stage))
+  ok('the destination keeps its own file, byte for byte', fs.readFileSync(path.join(home.to, 'readme.txt'), 'utf8') === 'y\n')
+  ok('the source is untouched', fs.readFileSync(path.join(home.from, 'readme.txt'), 'utf8') === 'x\n')
+  ok('the session stayed where it was', fs.existsSync(path.join(home.oldKeyDir, 'session-1')))
+  ok('no workspace was registered at the destination', !registry.entities.some((entity) => entity.path === home.to), JSON.stringify(registry.entities.map((entity) => entity.path)))
 
-    const result = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to, moveProject: true, backupTarget: true }))
-    ok('the move succeeds', result.ok === true, JSON.stringify(result.blockers ?? result))
-    ok('the source file is what now lives at the destination', fs.readFileSync(path.join(home.to, 'readme.txt'), 'utf8') === 'x\n', fs.readFileSync(path.join(home.to, 'readme.txt'), 'utf8'))
-    const parked = fs.readdirSync(fakeDesktop).filter((name) => name.startsWith('dsh-workspace-migrate-backup-'))
-    ok('the destination tree was parked on the Desktop', parked.length === 1, JSON.stringify(fs.readdirSync(fakeDesktop)))
-    ok('the parked copy still holds the old file', fs.readFileSync(path.join(fakeDesktop, parked[0], 'readme.txt'), 'utf8') === 'y\n')
-    ok('the report says where it went', (result.notes ?? []).some((note) => /parked at .*Desktop/.test(note)), JSON.stringify(result.notes))
-  } finally {
-    if (previousProfile === undefined) delete process.env.USERPROFILE
-    else process.env.USERPROFILE = previousProfile
-    fs.rmSync(home.root, { recursive: true, force: true })
-  }
+  // The same non-empty destination is fine when nothing is copied over it: with「仅修改目录」the
+  // workspace simply starts pointing at a directory that has content of its own.
+  const keep = await inspectLiveMove(services, { fromPath: home.from, toPath: home.to })
+  ok('「仅修改目录」accepts the very same destination', keep.ok === true, JSON.stringify(keep.blockers))
+  fs.rmSync(home.root, { recursive: true, force: true })
 }
 
-// ── and a failed move puts the parked tree back ────────────────────────────
-console.log('\n[20] a failed move puts the parked destination tree back')
+// ── a failure after the destination was created takes it back ──────────────
+console.log('\n[20] a rollback removes the destination directory it created')
 {
-  const home = makeHome('backupundo', ['session-1'], { destinationExists: false })
-  fs.mkdirSync(home.to, { recursive: true })
-  fs.writeFileSync(path.join(home.to, 'old.txt'), 'keep me\n')
-  const fakeHome = path.join(home.root, 'fake-user')
-  const fakeDesktop = path.join(fakeHome, 'Desktop')
-  fs.mkdirSync(fakeDesktop, { recursive: true })
-  const previousProfile = process.env.USERPROFILE
-  process.env.USERPROFILE = fakeHome
-  try {
-    const registry = fakeRegistry(home, { failAttach: true })
-    const services = fakeServices({ registry, sessionsRoot: home.sessionsRoot, cwdBySession: { 'session-1': home.from } })
-    const result = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to, moveProject: true, backupTarget: true }))
+  const home = makeHome('mkundir', ['session-1'], { destinationExists: false })
+  const services = fakeServices({
+    registry: fakeRegistry(home, { failAttach: true }),
+    sessionsRoot: home.sessionsRoot,
+    cwdBySession: { 'session-1': home.from },
+  })
+  const result = await withHome(home, () => liveMoveSessions(services, { fromPath: home.from, toPath: home.to }))
 
-    ok('fails in the memory layer', result.ok === false && result.stage === 'memory-layer', JSON.stringify(result.stage))
-    ok('the project came back to the source', fs.existsSync(path.join(home.from, 'readme.txt')))
-    ok('the parked tree is back at the destination', fs.existsSync(path.join(home.to, 'old.txt')) && fs.readFileSync(path.join(home.to, 'old.txt'), 'utf8') === 'keep me\n')
-    ok('the Desktop no longer holds a parked copy', fs.readdirSync(fakeDesktop).filter((name) => name.startsWith('dsh-workspace-migrate-backup-')).length === 0, JSON.stringify(fs.readdirSync(fakeDesktop)))
-    ok('the rollback reported no undo error', Array.isArray(result.rollback?.undoErrors) && result.rollback.undoErrors.length === 0, JSON.stringify(result.rollback))
-  } finally {
-    if (previousProfile === undefined) delete process.env.USERPROFILE
-    else process.env.USERPROFILE = previousProfile
-    fs.rmSync(home.root, { recursive: true, force: true })
-  }
+  ok('the run fails in the memory layer', result.ok === false && result.stage === 'memory-layer', JSON.stringify(result.stage))
+  ok('the created destination directory is gone again', !fs.existsSync(home.to), home.to)
+  ok('the rollback reported no undo error', Array.isArray(result.rollback?.undoErrors) && result.rollback.undoErrors.length === 0, JSON.stringify(result.rollback))
+  ok('the source project is intact', fs.readFileSync(path.join(home.from, 'readme.txt'), 'utf8') === 'x\n')
+  ok('the session artifact is back at the old projectKey', fs.existsSync(path.join(home.oldKeyDir, 'session-1')))
+  fs.rmSync(home.root, { recursive: true, force: true })
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS' : 'FAILURES'}: ${checks - failures}/${checks} checks passed`)

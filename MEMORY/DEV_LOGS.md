@@ -158,3 +158,34 @@
   补 `github:wfql1024/dsh-workspace-migrate` 一条命令路线，并加排错表。
 - **附带确认**：profile 没被写脏（pnpm 在解析阶段就失败）；用户 profile 里
   `dsh-client-liang-intensity-skin -> github:kingOfSoySauce/dsh-liang-skin` 证明 `github:` 形式在其环境可用。
+
+## 2026-09-25 — 用户否掉"备份目标目录"，并要求自动创建目标目录
+
+用户拿到上一版（D17 的「自动备份目标并覆盖」）后直接提了两条：
+
+1. **修复**：带文件迁移时**去掉备份逻辑**与那个复选框。"如果目标目录下有内容则 Check 失败，在 Check 输出中提醒用户目标目录下有内容。"
+2. **优化**：「仅修改目录」时目标路径不存在 → **默认自动创建**，"只要路径是合法的"。
+
+**改动**（D20）：桌面备份整条链路删除（`desktopRoot` / `desktopBackupDir` / `--backup-target` / 面板复选框 /
+回滚里的"搬回" / `plan.project.backupDir` / `moveProjectDirectory` 的 `parked` 返回值）；
+「连同文件迁移」+ 目标有内容 ⇒ `Check` 失败，文案给两条出路；「仅修改目录」+ 目标不存在 ⇒ `Check` 通过并在
+**执行时**建一个空目录（live 的 layer 0 / 引擎 apply 的 project 步骤各一次，压 `destination-directory` 撤销项）；
+盘符不存在 ⇒ `Check` 失败。
+
+**踩到的坑**：`verifyPlan` 里我一度把"目标目录存在"改成无条件断言，结果 livetest [10] 红了 ——
+回滚时 `relocate-sessions --rollback` 跑在"项目目录已经搬走、还没搬回"的中间态，
+`expectMigrated: false` 去查 `plan.to` 当然不存在（而 `keep` 计划原本会跳过这条）。
+**修复**：`expectMigrated || plan.project.action !== 'keep'` 才断言 —— 前向必须存在，原始态对 `keep` 不作要求。
+
+**验证**：selftest [Test M]（拒绝 + 目标文件原样未动 + 同一目标改用 `keep` 被接受）、
+selftest [Test M2]（空目标可用；缺失目标被创建且 verify 通过；缺失盘被拒）、
+livetest [12]（`keep` 创建目标目录并写入注册）、[12b]（盘不存在时 `Check` 点名）、
+[19]（内容 ⇒ 拒绝且目标文件按字节未动）、[20]（失败后创建的空目录被撤销）；
+变异 `destination-content-allowed` / `live-destination-content-allowed` /
+`keep-does-not-create-destination` / `engine-keep-does-not-create-destination` 必须让对应套件变红。
+测试基线：hosttest 85、clienttest 99、livetest 178、selftest 160 = **522 项断言 / 20 个变异**（20/20 全部被抓住）。
+
+**顺带修了变异工具的一个盲点**：第一轮 `run-mutations.mjs` 被我自己的 600s 超时杀掉，`finally` 里的还原没跑到，
+于是 `lib/live-move.mjs` 一直带着 `MUTATION: writer header left at the destination`；下一轮只报 `livetest 177/178`，
+看上去像真实回归（差点去查一个不存在的 bug）。现在 `run-mutations.mjs` 开工前先检查残留
+（`.mutbak` 还在、或文件里仍留着 `MUTATION:` 串），命中就以退出码 2 明确指出来。

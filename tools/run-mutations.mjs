@@ -29,6 +29,32 @@ function runSuite(relative) {
   return { status: result.status, failures, verdict }
 }
 
+// A killed run (Ctrl-C, a timeout, a closed terminal) never reaches the `finally` that puts the
+// original file back, so the tree can be left carrying a mutation. Left undetected that is
+// invisible: the suites go red for a reason that has nothing to do with the change being tested.
+// Measured once the hard way — a 600s timeout left `lib/live-move.mjs` holding
+// "MUTATION: writer header left at the destination" and the next run only reported
+// "livetest 177/178", which reads like a real regression.
+function findDirtyTree() {
+  const dirty = []
+  for (const mutation of MUTATIONS) {
+    const file = path.join(ROOT, mutation.file)
+    if (fs.existsSync(`${file}.mutbak`)) dirty.push(`${mutation.file}.mutbak (a previous run was killed)`)
+    if (mutation.to.includes('MUTATION:') && fs.readFileSync(file, 'utf8').includes(mutation.to)) {
+      dirty.push(`${mutation.file} still contains "${mutation.to.split('\n')[0].trim()}"`)
+    }
+  }
+  return [...new Set(dirty)]
+}
+
+const leftoversFound = findDirtyTree()
+if (leftoversFound.length > 0) {
+  console.error('the working tree still carries a mutation from a previous run:')
+  for (const entry of leftoversFound) console.error(`  - ${entry}`)
+  console.error('restore the original content (a .mutbak beside the file holds a pre-mutation copy) and retry')
+  process.exit(2)
+}
+
 /** Replace `from` exactly once, refusing to guess when the anchor is not unique. */
 function mutate(source, mutation) {
   if (mutation.from instanceof RegExp) {

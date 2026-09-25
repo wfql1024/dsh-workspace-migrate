@@ -488,17 +488,13 @@ function createTool(ctx) {
         dryRun: { type: 'boolean', description: 'For action "live": report what would happen and why it might be refused, changing nothing' },
         moveProject: {
           type: 'boolean',
-          description: 'For action "live": also move the project directory itself. A destination that already holds files is refused unless backupTarget is set too.',
-        },
-        backupTarget: {
-          type: 'boolean',
-          description: 'For live/plan with a project move: park whatever the destination directory already holds on the Desktop, then move the project in. Without it, a non-empty destination is refused.',
+          description: 'For action "live": also move the project directory itself. A destination that already holds files fails the check and is never touched.',
         },
         sessions: { type: 'string', description: 'For action "live": comma-separated session ids to restrict the move to (default: every session in the source workspace)' },
         project: {
           type: 'string',
           enum: ['auto', 'move', 'copy', 'keep'],
-          description: 'What to do with the project directory itself: auto (default) moves it when it exists, keep leaves the files alone',
+          description: 'What to do with the project directory itself: auto (default) moves it when it exists, keep leaves the files alone and creates the destination when it is missing',
         },
         planFile: { type: 'string', description: 'Path to a staged plan.json (required for verify)' },
       },
@@ -548,7 +544,6 @@ function createTool(ctx) {
           title: asString(args.title).length > 0 ? asString(args.title) : undefined,
           sessionIds: sessionIds.length > 0 ? sessionIds : undefined,
           moveProject: args.moveProject === true,
-          backupTarget: args.backupTarget === true,
         }
         const inspect = await inspectLive(services, liveOptions)
         if (args.dryRun === true) {
@@ -824,8 +819,6 @@ function makeRoutes(ctx) {
         const argv = ['plan', '--from', from, '--to', to, '--json']
         if (asString(body.title).length > 0) argv.push('--title', asString(body.title))
         if (asString(body.project).length > 0) argv.push('--project', asString(body.project))
-        // "Back up the destination and overwrite": only meaningful together with a project move.
-        if (body.backupTarget === true && asString(body.project) !== 'keep') argv.push('--backup-target')
         // Record where DSH was answering, so a later `check-quiescent` from the staged .cmd can
         // detect a running DSH without relying on the process probe alone.
         const origin = asString(req.headers && req.headers.host)
@@ -874,7 +867,6 @@ function makeRoutes(ctx) {
             toPath,
             sessionIds: asStringArray(body.sessionIds),
             moveProject: body.moveProject === true,
-            backupTarget: body.backupTarget === true,
           })
           writeJson(res, 200, report)
         } catch (error) {
@@ -910,7 +902,6 @@ function makeRoutes(ctx) {
             title: asString(body.title).length > 0 ? asString(body.title) : undefined,
             sessionIds: asStringArray(body.sessionIds),
             moveProject: body.moveProject === true,
-            backupTarget: body.backupTarget === true,
           })
           writeJson(res, result.ok === true ? 200 : 409, result)
         } catch (error) {

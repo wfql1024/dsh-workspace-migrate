@@ -646,40 +646,70 @@ console.log('\n[Test L] a plan remembers where DSH was serving, and the guard pr
 }
 
 // ── Test M: moving the files into a destination that holds files ────────────
-console.log('\n[Test M] a non-empty destination is parked on the Desktop, then overwritten')
+console.log('\n[Test M] a non-empty destination fails the check and is left exactly as it was')
 {
   const root = freshRoot('M')
   const env = scenario(root, { sessions: [{ id: 'session-ffffffff-1111-1111-1111-111111111111', versions: [3] }] })
   const base = ['--dsh-home', env.dshHome, '--json']
-  // The destination already holds a file; the engine must park it on the Desktop before moving in.
+  // The destination already holds a file: nothing may be moved in over it, and nothing may be
+  // parked anywhere either — the user decides what that directory is for.
   fs.mkdirSync(env.to, { recursive: true })
   fs.writeFileSync(path.join(env.to, 'occupant.txt'), 'old destination file\n')
 
-  const fakeHome = path.join(root, 'fake-user')
-  fs.mkdirSync(path.join(fakeHome, 'Desktop'), { recursive: true })
-  const previousProfile = process.env.USERPROFILE
-  process.env.USERPROFILE = fakeHome
-  try {
-    const refused = run(['plan', '--from', env.from, '--to', env.to, '--project', 'move', ...base])
-    ok('without the flag the plan is refused', refused.json?.ok === false, JSON.stringify(refused.json?.errors))
-    ok('and it names the reason', JSON.stringify(refused.json?.errors ?? []).includes('already holds'), JSON.stringify(refused.json?.errors))
+  const plan = run(['plan', '--from', env.from, '--to', env.to, '--project', 'move', ...base])
+  ok('the plan is refused', plan.json?.ok === false, JSON.stringify(plan.json?.errors))
+  ok('and it names the reason', JSON.stringify(plan.json?.errors ?? []).includes('already holds'), JSON.stringify(plan.json?.errors))
+  ok('it names the directory', (plan.json?.errors ?? []).some((error) => error.includes(env.to)), JSON.stringify(plan.json?.errors))
+  ok('it offers emptying it or only changing the path', (plan.json?.errors ?? []).some((error) => /empty it yourself/.test(error) && /only change the path/.test(error)), JSON.stringify(plan.json?.errors))
+  ok('it promises nothing about a backup', !/back ?up|Desktop|parked/i.test(JSON.stringify(plan.json?.errors ?? [])), JSON.stringify(plan.json?.errors))
+  ok('the staged plan carries the refusal', (() => {
+    const staged = JSON.parse(fs.readFileSync(plan.json.stage.planFile, 'utf8'))
+    return staged.ok === false && (staged.errors ?? []).length > 0
+  })(), JSON.stringify(plan.json?.stage))
+  ok('the occupying file is untouched', fs.readFileSync(path.join(env.to, 'occupant.txt'), 'utf8') === 'old destination file\n')
+  ok('the source is untouched', fs.existsSync(path.join(env.from, 'src', 'nested', 'a.txt')))
 
-    const plan = run(['plan', '--from', env.from, '--to', env.to, '--project', 'move', '--backup-target', ...base])
-    ok('with the flag the plan is ok', plan.json?.ok === true, JSON.stringify(plan.json?.errors))
-    ok('the plan says where the old files go', typeof plan.json?.project?.backupDir === 'string' && plan.json.project.backupDir.includes('Desktop'), JSON.stringify(plan.json?.project))
-    ok('and warns about it', (plan.json?.warnings ?? []).some((w) => /will be moved to/.test(w)), JSON.stringify(plan.json?.warnings))
+  // The same destination is fine for "only change the path": nothing is copied over it.
+  const keep = run(['plan', '--from', env.from, '--to', env.to, '--project', 'keep', ...base])
+  ok('the same destination is accepted by --project keep', keep.json?.ok === true, JSON.stringify(keep.json?.errors))
+}
 
-    const apply = run(['apply', '--plan', plan.json.stage.planFile, '--yes', '--allow-running', ...base])
-    ok('apply exits 0', apply.code === 0, apply.json?.error ?? apply.stderr.trim())
-    ok('the source file is now at the destination', fs.existsSync(path.join(env.to, 'src', 'nested', 'a.txt')) && !fs.existsSync(path.join(env.to, 'occupant.txt')))
-    const parkedAt = plan.json.project.backupDir
-    ok('the old destination file is parked', fs.existsSync(path.join(parkedAt, 'occupant.txt')), parkedAt)
-    ok('the parked copy is intact', fs.readFileSync(path.join(parkedAt, 'occupant.txt'), 'utf8') === 'old destination file\n')
-    const verify = run(['verify', '--plan', plan.json.stage.planFile, ...base])
-    ok('verify passes', verify.json?.ok === true, JSON.stringify(verify.json?.failures))
-  } finally {
-    if (previousProfile === undefined) delete process.env.USERPROFILE
-    else process.env.USERPROFILE = previousProfile
+// ── Test M2: an empty or missing destination for a project move ─────────────
+console.log('\n[Test M2] an empty destination is fine; "only change the path" creates a missing one')
+{
+  const root = freshRoot('M2')
+  const env = scenario(root, { sessions: [{ id: 'session-ffffffff-2222-2222-2222-222222222222', versions: [3] }] })
+  const base = ['--dsh-home', env.dshHome, '--json']
+
+  // An existing but empty destination: the move may use it.
+  fs.mkdirSync(env.to, { recursive: true })
+  const intoEmpty = run(['plan', '--from', env.from, '--to', env.to, '--project', 'move', ...base])
+  ok('an empty destination is accepted', intoEmpty.json?.ok === true, JSON.stringify(intoEmpty.json?.errors))
+
+  // A missing destination for "only change the path": the plan says it will be created, and apply
+  // creates exactly that one empty directory.
+  const missingTo = path.join(root, 'brand', 'new', 'Place')
+  const keep = run(['plan', '--from', env.from, '--to', missingTo, '--project', 'keep', ...base])
+  ok('a missing destination is accepted', keep.json?.ok === true, JSON.stringify(keep.json?.errors))
+  ok('the plan marks it for creation', keep.json?.project?.createDestination === true, JSON.stringify(keep.json?.project))
+  ok('and says so in the warnings', (keep.json?.warnings ?? []).some((w) => /does not exist yet; apply creates it/.test(w)), JSON.stringify(keep.json?.warnings))
+  ok('nothing was created at plan time', !fs.existsSync(missingTo))
+
+  const apply = run(['apply', '--plan', keep.json.stage.planFile, '--yes', '--allow-running', ...base])
+  ok('apply exits 0', apply.code === 0, apply.json?.error ?? apply.stderr.trim())
+  ok('the destination directory now exists', fs.existsSync(missingTo) && fs.statSync(missingTo).isDirectory(), missingTo)
+  ok('it is empty', fs.readdirSync(missingTo).length === 0, JSON.stringify(fs.readdirSync(missingTo)))
+  ok('the source project was not touched', fs.existsSync(path.join(env.from, 'src', 'nested', 'a.txt')))
+  const verify = run(['verify', '--plan', keep.json.stage.planFile, ...base])
+  ok('verify passes', verify.json?.ok === true, JSON.stringify(verify.json?.failures))
+
+  // A path on a drive that is not there is refused rather than attempted.
+  const missingDrive = ['A:\\', 'B:\\'].find((candidate) => !fs.existsSync(candidate))
+  if (missingDrive === undefined) {
+    console.log('  (skipped: no absent drive letter to test with)')
+  } else {
+    const impossible = run(['plan', '--from', env.from, '--to', path.join(missingDrive, 'nope', 'Place'), '--project', 'keep', ...base])
+    ok('a destination on a missing drive is still refused', impossible.json?.ok === false, JSON.stringify(impossible.json?.errors))
   }
 }
 

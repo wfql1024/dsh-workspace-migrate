@@ -88,7 +88,7 @@
 | 删 junction | 用 `cmd /c rmdir <链接>`；`Remove-Item -Recurse` 可能连链接指向的真实目录内容一起删 |
 | `Get-CimInstance` 探测 DSH 进程 | 偶发失败（超时/无输出）。失败时**不能**当作"没有 DSH 在跑"（D9 就是为此） |
 | 进程探测的**漏报** | 真机遇到过：DSH 明明在运行，从 `1-apply-migration.cmd` 里跑探测却返回"没找到" → 于是加了第二个信号：计划里记下 DSH 当时服务的 `host:port`，用 TCP 连接判断它是否还在（D9） |
-| 桌面的真实位置 | Windows 上可能是 `%USERPROFILE%\Desktop`、`%USERPROFILE%\OneDrive\Desktop`，本地化安装还可能是 `桌面` —— 三个候选按顺序取第一个存在的 |
+| `fs.mkdirSync(p, { recursive: true })` | `keep`（仅修改目录）下创建目标目录用它：父目录一并建；盘符不存在时抛 `ENOENT`（所以在 `Check` 阶段先用 `path.parse(to).root` 判断，见 D20） |
 
 ## 8. 插槽与注册（客户端半体）
 

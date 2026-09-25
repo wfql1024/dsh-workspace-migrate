@@ -268,11 +268,10 @@ window.__ModuleLoader__.load({
 			const [manual, setManual] = react.useState(false);
 			/**
 			 * How the destination is reached: move the project's files there too (default), or only
-			 * re-point the workspace at a path the user has already prepared. With the files moving,
-			 * `backupTarget` parks whatever the destination already holds on the Desktop first.
+			 * re-point the workspace at a path — one that is created for you when it is missing. A
+			 * destination that already holds files is never taken over: the check fails and says so.
 			 */
 			const [moveFiles, setMoveFiles] = react.useState(true);
-			const [backupTarget, setBackupTarget] = react.useState(false);
 			const [liveInspect, setLiveInspect] = react.useState(null);
 			const [liveResult, setLiveResult] = react.useState(null);
 			/** Which result rows are open; an explicit toggle wins, otherwise the default applies. */
@@ -318,7 +317,7 @@ window.__ModuleLoader__.load({
 				setLiveInspect(null);
 				setLiveResult(null);
 				setPlan(null);
-				callApi("/live-inspect", { from: from.trim(), to: to.trim(), moveProject: moveFiles, backupTarget: backupTarget }).then(
+				callApi("/live-inspect", { from: from.trim(), to: to.trim(), moveProject: moveFiles }).then(
 					(result) => {
 						const payload = result.payload;
 						if (!(payload && typeof payload.ok === "boolean")) {
@@ -331,7 +330,7 @@ window.__ModuleLoader__.load({
 							setBusy(false);
 							return;
 						}
-						callApi("/live-move", { from: from.trim(), to: to.trim(), moveProject: moveFiles, backupTarget: backupTarget, confirm: true }).then(
+						callApi("/live-move", { from: from.trim(), to: to.trim(), moveProject: moveFiles, confirm: true }).then(
 							(moved) => {
 								const outcome = moved.payload;
 								if (outcome && typeof outcome.ok === "boolean") {
@@ -496,7 +495,7 @@ window.__ModuleLoader__.load({
 				setVerify(null);
 				// The「方式」slider applies to the manual flow too: without this the staged script
 				// would leave the project where it is and the slider would lie.
-				callApi("/plan", { from: from.trim(), to: to.trim(), project: moveFiles ? "move" : "keep", backupTarget: backupTarget }).then(
+				callApi("/plan", { from: from.trim(), to: to.trim(), project: moveFiles ? "move" : "keep" }).then(
 					(result) => {
 						const payload = result.payload;
 						if (payload && payload.ok === true && payload.json) {
@@ -654,7 +653,6 @@ window.__ModuleLoader__.load({
 									className: "dwsm-mode" + (moveFiles ? "" : " dwsm-mode-on"),
 									onClick: () => {
 										setMoveFiles(false);
-										setBackupTarget(false);
 										setLiveInspect(null);
 										setLiveResult(null);
 										setPlan(null);
@@ -663,25 +661,6 @@ window.__ModuleLoader__.load({
 								"仅修改目录",
 							),
 						),
-						// Only meaningful while the files are being moved: with「仅修改目录」nothing is copied
-						// over, so there is nothing to back up.
-						moveFiles
-							? react.createElement(
-									"label",
-									{ className: "dwsm-check" },
-									react.createElement("input", {
-										type: "checkbox",
-										checked: backupTarget,
-										onChange: (event) => {
-											setBackupTarget(event.target.checked);
-											setLiveInspect(null);
-											setLiveResult(null);
-											setPlan(null);
-										},
-									}),
-									"自动备份目标并覆盖",
-								)
-							: null,
 					),
 					react.createElement(
 						"div",
@@ -750,7 +729,7 @@ window.__ModuleLoader__.load({
 						"项目目录: " +
 							(liveInspect.project.willMove ? "将被一起搬迁" : "保持原位") +
 							"（源 " + (liveInspect.project.sourceExists ? "存在" : "不存在") +
-							"，目标 " + (liveInspect.project.destinationExists ? "已存在" : "可写") + "）",
+							"，目标 " + (liveInspect.project.destinationExists ? "已存在" : (liveInspect.project.createDestination ? "不存在，将自动创建" : "不存在")) + "）",
 					);
 				}
 				lines.push("待迁移会话: " + text((liveInspect.sessionIds || []).length) + " 个");
@@ -780,7 +759,7 @@ window.__ModuleLoader__.load({
 					lines.push("会话: " + text(liveResult.movedCount) + " 个");
 					lines.push(text(liveResult.from) + "  ->  " + text(liveResult.to));
 					lines.push("工作区: " + (liveResult.workspaceCreated ? "已新建" : "复用已有的") + " " + text(liveResult.workspaceTitle));
-					lines.push("项目目录: " + (liveResult.projectMoved ? "已一起搬迁" : "保持原位"));
+					lines.push("项目目录: " + (liveResult.projectMoved ? "已一起搬迁" : "保持原位") + (liveResult.destinationCreated ? "（目标目录已创建）" : ""));
 					for (const id of liveResult.sessionIds || []) lines.push("   - " + text(id));
 				} else {
 					lines.push("[×] 迁移失败（阶段：" + text(liveResult.stage) + "）");
