@@ -258,3 +258,21 @@ owner 不给这个 prop 时保留标签（"标签总在"比"可能只剩一个�
 
 **未做**：真正的迁移没有在 0.1.7-rc.2 上重跑（只做了只读核对 + 离线套件）；建议先在临时工作区上
 `workspace_migrate { action: "live", dryRun: true }` 走一遍再动真实数据。
+
+### 2026-09-25 晚（追加）— 窄条里「迁移」两个字还是竖的
+
+用户看到窄条里标签**竖排**（逐字换行），要求"改成横向"。
+
+**根因**：`inline-flex` 的标签在 56px 宽里**软换行**，两个汉字就逐字落行 ⇒ 看起来像竖排。
+（`wide` prop 那条路本来就不会渲染标签，所以这一版大概率是浏览器还在跑改动前的 bundle；
+但不管跑哪一版，标签能换行这件事本身就是缺陷。）
+
+**修复**（同 D22，两条与 prop 无关的保险）：
+- `.dwsm-entry-label{white-space:nowrap}` —— 窄容器里也不可能再竖排；
+- `dsh-client-ui-layout` 在 AppFrame 根节点写 `data-sidebar-collapsed="true"`（FACTS §8），
+  所以 `[data-sidebar-collapsed="true"] .dwsm-entry` 这套规则在**没有** `wide` prop 时同样
+  去掉标签、把按钮做成 36×36。两条信号都留着，谁失效都不影响外观。
+
+**验证**：clienttest [5] +3（nowrap 规则、属性选择器规则、同一条里的方形尺寸），
+变异 `rail-attribute-rule-dropped`（删掉属性规则）必须变红（实测 1 条断言失败）；
+全套 574 项绿、26/26 变异被抓住。

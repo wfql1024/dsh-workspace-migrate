@@ -101,6 +101,8 @@
 | `sidebar.footer.action` 的 **owner props** | 只有一个：`SidebarFooterActionOwnerProps { wide: boolean }` —— "Whether the sidebar renders wide content (**false = 56px rail**)"。住在 `dsh-client-ui-sidebar/lib/client.js`：`renderSlot("sidebar.footer.action", { wide })` | 侧栏收起时组件收到的 `wide === false`，据此把文字标签去掉只留图标（D22）。**实测来源**：0.1.7-rc.2 上 `cordis_inspect_query(client/Slots, root: "sidebar.footer.action")` 的 `ownerProps` —— 这也是唯一可靠的查法（class 名是带 hash 的 `hHd-Xa_*`，不能拿来当契约） |
 | 侧栏收起时 owner 的布局 | CSS 实测：`.hHd-Xa_collapsed .hHd-Xa_footerActions{justify-content:center;width:auto;display:flex}` | 收起时容器**居中且宽度自适应**，所以一个窄长条按钮会显得偏；rail 版本要做成 `36×36` 的方形图标钮 |
 | 参考实现 | `dsh-session-manager`（同一座位）在 `wide === false` 时渲染 `36×36`、图标 18px、只给 `title`/`aria-label` 的按钮；`wide` 时图标 14px + 文字标签 | 我们照同一套形状做（D22），只是图标用自带字形 `⇄`，不额外依赖 `@deepseek-ai/dsh-client-ui-primitives` |
+| 侧栏收起的 **DOM 信号** | `dsh-client-ui-layout/lib/client.js:322` 在 AppFrame 根节点上写 `"data-sidebar-collapsed": sidebarCollapsed \|\| void 0` —— 真机 HTML 里就是 `data-sidebar-collapsed="true"`（收起时），展开时属性不存在 | 这个属性在**每个 sidebar 座位的祖先链上**，所以 CSS 也可以判收起：`[data-sidebar-collapsed="true"] .dwsm-entry …`。比带 hash 的 class（`hHd-Xa_*`）可靠，但仍是**别人的 DOM**，所以它只做 `wide` prop 之外的**第二条**信号（D22） |
+| 中文标签在窄条里会**竖排** | 软换行 + 56px 宽度 ⇒ 两个汉字逐字换行，看起来像竖排 | 标签一律 `white-space:nowrap`；窄条里直接不渲染标签 |
 
 守这些事实的断言在 `test/clienttest.mjs`：四个座位都注册、每个注册都被 fiber effect 拥有、
 `sidebar.workspaces is never registered (that single slot would shadow the shipped sidebar)`、

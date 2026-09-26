@@ -293,6 +293,9 @@
   - `wide !== false`（宽侧栏，或 owner 没给这个 prop）→ 现在的外观：`⇄` + 「迁移」；
   - `wide === false` → **去掉标签**，`36×36` 方形图标钮（图标 18px），`title` / `aria-label` 仍写「工作区迁移」。
   图标用自带的 `⇄` 字形，**不**引入 `@deepseek-ai/dsh-client-ui-primitives`（多一个外部依赖就多一个版本风险）。
+  用户随后补了一条：窄条里「迁移」两个字**竖着**排。所以再加两条与 prop 无关的保险 ——
+  标签一律 `white-space:nowrap`（软换行才是竖排的原因），以及用 AppFrame 根节点上的
+  `[data-sidebar-collapsed="true"]` 属性选择器（FACTS §8）同样去掉标签并把按钮做成方形。
 - **理由**：`wide` 是座位**声明**的契约（`SidebarFooterActionOwnerProps`，实测来源见 FACTS §8），不是猜的 class 名；
   收起时 owner 的容器是 `justify-content:center; width:auto`，方形按钮才是它期待的尺寸。
   拿不到 prop 时保留标签，是因为"标签总是可见"比"可能只剩一个没人看得懂的字形"更安全。
