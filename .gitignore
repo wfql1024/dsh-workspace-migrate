@@ -4,3 +4,7 @@ node_modules/
 *.tgz
 # Development-only hot-reload marker honoured by index.js; never part of a release.
 DEV_RELOAD
+# Scratch files a `git add -A` would otherwise pick up (seen twice: a commit-message file slipped
+# into a commit and had to be removed in a follow-up). `git commit -F` output belongs in $TEMP.
+COMMIT_MSG_TMP
+.commit-msg.txt
