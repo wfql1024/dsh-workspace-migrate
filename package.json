@@ -1,6 +1,6 @@
 {
   "name": "dsh-workspace-migrate",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Move a DeepSeek Harness (DSH) workspace — its project directory, its registration and every session, including the conversation you are chatting in — to a new path without stopping DSH. 不停机迁移 DSH 工作区：项目目录、注册记录与全部会话（含正在对话的那条）一起搬走，历史与写句柄都跟着走；另附可选的停机计划模式。",
   "license": "MIT",
   "repository": {
@@ -29,6 +29,7 @@
     "lib/zstd-frames.mjs",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
     "MEMORY",
     "test"
   ],

@@ -287,4 +287,17 @@ owner 不给这个 prop 时保留标签（"标签总在"比"可能只剩一个�
 - 启动日志示例写的是 `mounted — 9/9 routes`，实际是 **10/10**（`/prune-runs` 之前的某版加进来后没同步）；
 - 顶部 DSH 徽章还写着 `0.1.5-rc.1`，改成 `0.1.7-rc.2`（兼容表里本来就同时列了两版）。
 
-**未做**：`package.json` 的版本仍是 `1.0.0`（仓库没在 npm 发布，版本号只是标识；要不要为了这次改动升到 1.1.0 由用户决定）。
+**未做**：`package.json` 的版本仍是 `1.0.0`（仓库没在 npm 发布，版本号只是标识）—— **已由下一条处理：定为 `0.2.0`**。
+
+### 2026-09-25 深夜 — README 拆成两份（默认中文 + `README.en.md`），版本定 0.2.0，推送
+
+用户看到别的插件是"默认中文、英文放 `README.en.md`"，要求拆开；版本号指定 **0.2.0**（明确不用 1.x.x，因为这个插件还在 0.x 阶段）。
+
+- `README.md` = 中文（默认，与 README 顶部 `中文 | [English](README.en.md)` 互链）；`README.en.md` = 英文
+  （`[中文](README.md) | English`）。两份各自的徽章锚点也对：中文 `#兼容性`、英文 `#compatibility`。
+  拆分用一次性脚本从双语单文件里按标记切片，**没有手抄**，避免两侧内容漂移。
+- 版本号三处同步：`package.json`、`lib/dsh-workspace-migrate.mjs` 的 `VERSION`（报告与 `--help` 里会打印）、
+  两份 README 的兼容表；`package.json` 的 `files` 补上 `README.en.md`（否则 `npm pack` 不会带上英文版）。
+  profile 侧不用动：`pnpm-lock.yaml` 记的是 `link:` specifier，不含版本。
+- 推送：`24f4b61..8698a32`（第四轮那 6 个提交）先推上去，随后本轮再推一次。
+
