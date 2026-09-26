@@ -395,6 +395,24 @@ ok('the sidebar entry is labelled', sidebarHtml.includes('迁移'))
 ok('the header entry is a button', headerHtml.startsWith('<button'))
 ok('the header entry is labelled', headerHtml.includes('迁移工作区'))
 
+// The sidebar foot's owner prop is `wide` (false = the 56px rail), so the entry can drop its label
+// exactly where a two-character label would wrap vertically. Same seat contract dsh-session-manager
+// uses for the same slot.
+{
+	const sidebarEntry = registrations.find((r) => r.options.name === 'sidebar.footer.action').component
+	const railHtml = (await renderFresh(sidebarEntry, { wide: false })).second
+	const wideHtml = (await renderFresh(sidebarEntry, { wide: true })).second
+	ok('in the collapsed rail the entry drops its label', !railHtml.includes('>迁移<'), railHtml)
+	ok('and carries the rail class instead', railHtml.includes('dwsm-entry-rail'), railHtml)
+	ok('the glyph stays', railHtml.includes('⇄'), railHtml)
+	ok('the name survives for pointer and screen readers', railHtml.includes('title="工作区迁移"') && railHtml.includes('aria-label="工作区迁移"'), railHtml)
+	ok('a wide sidebar keeps the label', wideHtml.includes('>迁移<') && !wideHtml.includes('dwsm-entry-rail'), wideHtml)
+	ok('an owner that passes no prop falls back to the labelled form', sidebarHtml.includes('>迁移<') && !sidebarHtml.includes('dwsm-entry-rail'), sidebarHtml)
+	// The rail button must be a square target, not a padded strip: the entry is the only thing in
+	// the rail row, and a narrow one would sit off-centre in the owner's centered flex container.
+	ok('the rail styling is a square icon button', headChildren.length > 0 && /\.dwsm-entry-rail\{[^}]*width:36px;height:36px/.test(headChildren[0].textContent), 'the rail variant needs its own box')
+}
+
 console.log('\n[6] stylesheet injection')
 ok('a <style> tag was appended to document.head', headChildren.length === 1, `got ${headChildren.length}`)
 ok('the style tag is tagged with the plugin name', headChildren[0] && headChildren[0].dataset.plugin === 'dsh-workspace-migrate')

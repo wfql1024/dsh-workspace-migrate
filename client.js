@@ -58,6 +58,12 @@ window.__ModuleLoader__.load({
 			".dwsm-foot{display:flex;justify-content:flex-end;gap:8px;}",
 			".dwsm-entry{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:8px;border:1px solid transparent;background:transparent;color:inherit;cursor:pointer;font-size:12px;font-family:inherit;}",
 			".dwsm-entry:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.15));}",
+			".dwsm-entry-icon{display:inline-flex;align-items:center;justify-content:center;font-size:14px;line-height:1;}",
+			// Collapsed sidebar: the owner centers its children in a 56px rail, so the entry becomes a
+			// 36x36 icon-only button and the glyph carries the whole label (title/aria-label keep the
+			// name available to pointer and screen-reader users).
+			".dwsm-entry-rail{flex:none;justify-content:center;gap:0;width:36px;height:36px;padding:0;border-radius:12px;}",
+			".dwsm-entry-rail .dwsm-entry-icon{font-size:18px;}",
 			".dwsm-modes{display:inline-flex;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.45));border-radius:16px;overflow:hidden;}",
 			".dwsm-mode{padding:5px 12px;border:none;background:transparent;color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font-size:12px;font-family:inherit;}",
 			".dwsm-mode-on{background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.2));color:var(--dsw-alias-label-primary,inherit);font-weight:500;}",
@@ -1019,18 +1025,28 @@ window.__ModuleLoader__.load({
 		//#endregion
 
 		//#region entries
-		function SidebarEntry() {
+		/**
+		 * Sidebar-foot entry.
+		 *
+		 * The seat has exactly one owner prop — `wide`, false when the sidebar is collapsed into its
+		 * 56px rail (read from the live Slot catalog: `SidebarFooterActionOwnerProps { wide: boolean }`).
+		 * In the rail the owner centers its children and a two-character label would wrap vertically,
+		 * so the label is dropped and only the glyph remains, in a square button. Defence in depth:
+		 * an owner that passes nothing (a build older than the prop) keeps the labelled form.
+		 */
+		function SidebarEntry(props) {
+			const wide = !props || props.wide !== false;
 			return react.createElement(
 				"button",
 				{
 					type: "button",
-					className: "dwsm-entry",
+					className: wide ? "dwsm-entry" : "dwsm-entry dwsm-entry-rail",
 					title: "工作区迁移",
 					"aria-label": "工作区迁移",
 					onClick: () => openDialog(null),
 				},
-				react.createElement("span", { "aria-hidden": "true" }, "⇄"),
-				react.createElement("span", null, "迁移"),
+				react.createElement("span", { className: "dwsm-entry-icon", "aria-hidden": "true" }, "⇄"),
+				wide ? react.createElement("span", { className: "dwsm-entry-label" }, "迁移") : null,
 			);
 		}
 

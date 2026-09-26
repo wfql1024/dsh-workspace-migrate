@@ -158,6 +158,14 @@ export const MUTATIONS = [
     to: '					if (false) { /* MUTATION: the manual flow ignores the check */',
   },
   {
+    name: 'sidebar-entry-ignores-wide',
+    file: 'client.js',
+    suite: 'test/clienttest.mjs',
+    breaks: 'the sidebar entry ignores the collapsed-rail owner prop, so its label wraps vertically in the 56px rail',
+    from: '			const wide = !props || props.wide !== false;',
+    to: '			const wide = true; /* MUTATION: the rail variant is never used */',
+  },
+  {
     name: 'keep-does-not-create-destination',
     file: 'lib/live-move.mjs',
     suite: 'test/livetest.mjs',

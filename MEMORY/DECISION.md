@@ -285,6 +285,21 @@
   `projectOnly: false`，避免一次"检查模式"的调用被当成完整前置检查）；把文件夹也算内容，意味着用户
   不能借"空的子目录"暗示合并意图，必须自己清空目标目录。
 
+## D22 侧栏收起时只剩图标（跟随 owner 的 `wide` prop）
+
+- **背景**：用户报回：DSH 左侧会话栏收起成窄条后，别的插件（如 `dsh-session-manager` 的「会话管理」）只显示图标，
+  而本插件的「⇄ 迁移」还把中文标签一起画出来 —— 两个汉字在 56px 的窄条里会竖着折行。
+- **决定**：`SidebarEntry` 读座位给的 owner prop `wide`（`false` = 窄条）：
+  - `wide !== false`（宽侧栏，或 owner 没给这个 prop）→ 现在的外观：`⇄` + 「迁移」；
+  - `wide === false` → **去掉标签**，`36×36` 方形图标钮（图标 18px），`title` / `aria-label` 仍写「工作区迁移」。
+  图标用自带的 `⇄` 字形，**不**引入 `@deepseek-ai/dsh-client-ui-primitives`（多一个外部依赖就多一个版本风险）。
+- **理由**：`wide` 是座位**声明**的契约（`SidebarFooterActionOwnerProps`，实测来源见 FACTS §8），不是猜的 class 名；
+  收起时 owner 的容器是 `justify-content:center; width:auto`，方形按钮才是它期待的尺寸。
+  拿不到 prop 时保留标签，是因为"标签总是可见"比"可能只剩一个没人看得懂的字形"更安全。
+- **代价**：窄条状态下按钮的可见信息只有字形，含义靠 `title` 兜底；若 DSH 将来换掉 `wide` 这个名字，
+  会静默退回带标签的形态（难看，但不会坏）。守它的断言：clienttest "in the collapsed rail the entry drops
+  its label" 等 6 条，变异 `sidebar-entry-ignores-wide`。
+
 ## 已废止的旧设计（保留记录，避免重新发明）
 
 > 下面这些**曾经是对的**，后来被更好的做法取代。留着是为了以后有人想"简化"时先看到代价。

@@ -29,7 +29,8 @@
 
 ## UI 入口
 
-- **左侧侧栏底部**：「⇄ 迁移」，打开迁移对话框。
+- **左侧侧栏底部**：「⇄ 迁移」，打开迁移对话框；**侧栏收起成窄条时只剩「⇄」图标**（按钮变成 36×36 的方形图标钮，
+  名称仍在 `title` / `aria-label` 里，鼠标悬停可见）。
 - **对话标题栏右侧**：「迁移工作区」，**预选当前对话所在的工作区** —— 正在对话也可以迁。
 - **设置 → 工作区迁移**：同一个面板，随时进来看看。
 - **模态框里**：`Check` / `Migrate` / `Plan` / `Verify` / `暂存的手动迁移` 各占一行摘要，
@@ -178,7 +179,19 @@ dsh plugin --profile web remove dsh-workspace-migrate
 
 | 插件版本 | 已验证 DSH 版本 | Node |
 |---|---|---|
-| 1.0.0 | v0.1.5-rc.1 | ≥ 20 |
+| 1.0.0 | v0.1.5-rc.1、v0.1.7-rc.2 | ≥ 20 |
+
+在 **v0.1.7-rc.2** 上重新核对过（真机，不是只跑离线测试）：
+
+- 插件挂载正常，10 条 HTTP 路由全部应答，`workspace_migrate` 工具正常注册；
+- 四个座位 `sidebar.footer.action` / `conversation.session.header.actions` / `settings.section` / `shell.overlay`
+  在 **Slot 目录里都还是加法式（`replaceRisk: none`）**，本插件的四条注册都是 active；
+- 用到的私有面一个没少：`sessionPersistence.tracker.writers` / `.root` / `.locate()` / `.listArtifacts()`、
+  `workspaceRegistry.headers` / `.sessionPaths` / `.attachSession()` / `.create()` / `.validateStoredState()`、
+  `sessions.flush()` / `.get()`；
+- 两条靠别人实现的**不变量**也还在：会话日志第 0 帧必须"恰好一行"（否则 DSH 启动断言失败）、
+  同一路径被两条工作区记录声明会导致启动失败（`path '…' is claimed by both workspace '…' and …`）；
+- 本包**没有**声明 DSH 的 peer 依赖，所以插件管理器的版本检查不会挡住升级。
 
 依赖 DSH 的私有面（`sessionPersistence.tracker.writers`、`workspaceRegistry.headers` / `sessionPaths`、
 `sessions.flush`），全部带 `typeof` 守卫：拿不到就**拒绝迁移运行中的会话**并说明原因，而不是写坏数据。

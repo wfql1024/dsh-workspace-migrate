@@ -488,7 +488,8 @@ function createTool(ctx) {
         dryRun: { type: 'boolean', description: 'For action "live": report what would happen and why it might be refused, changing nothing' },
         moveProject: {
           type: 'boolean',
-          description: 'For action "live": also move the project directory itself. A destination that already holds files fails the check and is never touched.',
+          description:
+            'For action "live": also move the project directory itself. A destination that is not empty (a folder counts) fails the check and is never touched; a missing or empty one is used.',
         },
         sessions: { type: 'string', description: 'For action "live": comma-separated session ids to restrict the move to (default: every session in the source workspace)' },
         project: {

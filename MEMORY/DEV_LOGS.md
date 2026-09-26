@@ -219,3 +219,42 @@ hosttest [9]（`projectOnly` 在没有 registry 的宿主上也答得出来，�
 `live-refuses-empty-destination` / `manual-skips-check` / `destination-content-allowed` /
 `live-destination-content-allowed` 必须让对应套件变红。
 测试基线：hosttest 88、clienttest 111、livetest 193、selftest 172 = **564 项断言 / 24 个变异**（24/24 全部被抓住）。
+
+## 2026-09-25 晚 — DSH 升到 0.1.7-rc.2：兼容性核对 + 侧栏收起只剩图标
+
+用户把 DSH 从 0.1.5-rc.1 升到 **0.1.7-rc.2**，并要求①核对插件兼容性 ②让侧栏收起时本插件的按钮也只剩图标。
+
+**兼容性：只读核对，结论是"兼容"**（没有改一行代码来适配）：
+- `GET /api/dsh-workspace-migrate/state` → 200，`workspaceSource: "registry"`（说明插件挂载、registry 服务在）；
+- `cordis_inspect_query(client/Slots, root: …)` 四个座位都在、都是 `replaceRisk: none`，
+  本插件的四条注册 `workspace-migrate` / `workspace-migrate-dialog` 全是 active；
+- `Tool.listTools` 里 `workspace_migrate` 在，描述已是本轮改过的新文案 —— 顺带证明**当前运行的宿主加载的就是最新代码**；
+- 源码 grep 复核私有面全部仍在：`tracker.writers`(Map，含"施工中"的 `null` 占位)/`root`/`locate`/`listArtifacts`
+  （含 `duplicate JSONL session id … appears in multiple project directories`）、
+  `workspaceRegistry.headers`/`sessionPaths`/`attachSession`/`create`/`validateStoredState`
+  （含 `path '…' is claimed by both workspace '…' and …`）、`sessions.flush`/`get`、
+  `sessionProjectionCache.write`；第 0 帧"恰好一行"的断言仍在（`plaintext.indexOf(10) !== plaintext.length - 1` 抛错）；
+  `storages/` 仍是 `workspace.json` + `session_projcache.json` + `session_projcache/sessions/*.json`（本插件要改的字段都还在）；
+- 本包没有声明 DSH 的 peer 依赖 → 升级不会被插件管理器的版本检查挡住；DSH 自身没有 `engines` 约束。
+
+> 参考：`dsh-session-manager` 的注释提到 "DSH 0.1.6+ removed `ctx.sessions.open()`" —— 我们**没有**用它，
+> 它用的是 `ctx.uiWorkspace.openSession()`；本插件用到的面在 0.1.7-rc.2 上没变。
+
+**侧栏收起只剩图标**（D22）：先查座位契约，不猜 class 名（侧栏的 class 是带 hash 的 `hHd-Xa_*`，不能当接口）。
+`sidebar.footer.action` 的 owner props 只有一个 `{ wide: boolean }`，`false` 就是 56px 窄条；
+`dsh-session-manager` 在同一座位上的做法是 `wide` 时"14px 图标 + 标签"，非 `wide` 时"36×36、18px 图标、只留 title/aria-label"。
+本插件照同一形状做：`wide === false` 去掉「迁移」标签、方形图标钮，`title`/`aria-label` 仍是「工作区迁移」；
+owner 不给这个 prop 时保留标签（"标签总在"比"可能只剩一个看不懂的字形"安全）。图标继续用自带字形 `⇄`，
+不引入 `@deepseek-ai/dsh-client-ui-primitives`（少一个外部依赖就少一个版本风险）。
+
+**验证**：clienttest [5] 新增 6 条（rail 去标签、带 `dwsm-entry-rail`、字形还在、title/aria-label 还在、
+宽侧栏保留标签、无 prop 时保留标签）+ 1 条 CSS 断言（`\.dwsm-entry-rail{…width:36px;height:36px`）；
+变异 `sidebar-entry-ignores-wide`（把 `wide` 写死 true）必须让 clienttest 变红（实测 2 条断言失败）。
+顺带修掉 `index.js` 里 `moveProject` 参数描述残留的旧文案（"already holds files" → "is not empty"）。
+测试基线：hosttest 88、clienttest 118、livetest 193、selftest 172 = **571 项断言 / 25 个变异**（25/25 全部被抓住）。
+
+**生效方式**：客户端半体（`client.js`）改完**刷新页面**即可（bundle URL 带 `rev` = 文件大小+mtime 的哈希，
+宿主逐请求校验 rev，所以刷新一定拿到新字节）；`index.js` 是宿主半体，改完要**重启 DSH** 才生效（本次只是工具描述文案）。
+
+**未做**：真正的迁移没有在 0.1.7-rc.2 上重跑（只做了只读核对 + 离线套件）；建议先在临时工作区上
+`workspace_migrate { action: "live", dryRun: true }` 走一遍再动真实数据。

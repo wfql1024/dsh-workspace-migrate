@@ -98,7 +98,21 @@
 | `conversation.session.header.actions` 的作用域 | `session` 作用域，标准 props 里带 `sessionId` | 对话标题栏那个入口能预选当前对话的工作区（D10） |
 | **`sidebar.workspaces`** | 是 **`single`** 且 `shadows-shipped-ui` —— 注册它等于**替换整个原生会话列表** | **永不注册它**（D15）：一个搬家工具没理由接管会话列表，而且会和其它占了同一插槽的插件互相覆盖 |
 | 注册被拒时的行为 | 单条注册失败会被 catch 并打日志（`could not register <path> / <slot>: …`），**其余注册继续挂载** | 启动日志里出现一条 `could not register` 不等于插件没装上 |
+| `sidebar.footer.action` 的 **owner props** | 只有一个：`SidebarFooterActionOwnerProps { wide: boolean }` —— "Whether the sidebar renders wide content (**false = 56px rail**)"。住在 `dsh-client-ui-sidebar/lib/client.js`：`renderSlot("sidebar.footer.action", { wide })` | 侧栏收起时组件收到的 `wide === false`，据此把文字标签去掉只留图标（D22）。**实测来源**：0.1.7-rc.2 上 `cordis_inspect_query(client/Slots, root: "sidebar.footer.action")` 的 `ownerProps` —— 这也是唯一可靠的查法（class 名是带 hash 的 `hHd-Xa_*`，不能拿来当契约） |
+| 侧栏收起时 owner 的布局 | CSS 实测：`.hHd-Xa_collapsed .hHd-Xa_footerActions{justify-content:center;width:auto;display:flex}` | 收起时容器**居中且宽度自适应**，所以一个窄长条按钮会显得偏；rail 版本要做成 `36×36` 的方形图标钮 |
+| 参考实现 | `dsh-session-manager`（同一座位）在 `wide === false` 时渲染 `36×36`、图标 18px、只给 `title`/`aria-label` 的按钮；`wide` 时图标 14px + 文字标签 | 我们照同一套形状做（D22），只是图标用自带字形 `⇄`，不额外依赖 `@deepseek-ai/dsh-client-ui-primitives` |
 
 守这些事实的断言在 `test/clienttest.mjs`：四个座位都注册、每个注册都被 fiber effect 拥有、
 `sidebar.workspaces is never registered (that single slot would shadow the shipped sidebar)`、
-以及"设置页实例不做会话预选"。
+"设置页实例不做会话预选"，以及 `wide: false` 时**只剩图标**、`wide: true`/无 prop 时**保留标签**。
+
+## 9. DSH 版本兼容（实测记录）
+
+| DSH 版本 | 实测结果 | 谁在守 |
+|---|---|---|
+| v0.1.5-rc.1 | 第一版真机验证：不停机迁移（含正在对话的会话）、停机兜底都跑通 | DEV_LOGS 2026-09-17 ~ 09-20 |
+| **v0.1.7-rc.2** | 插件正常挂载；10 条路由全应答；`workspace_migrate` 工具在（且描述已是新文案）；四个座位都还是 `replaceRisk: none` 且本插件四条注册 active；私有面一个没少（`tracker.writers`/`root`/`locate`/`listArtifacts`、`workspaceRegistry.headers`/`sessionPaths`/`attachSession`/`create`/`validateStoredState`、`sessions.flush`/`get`、`sessionProjectionCache.write`）；两条不变量仍在（第 0 帧恰好一行、同一路径不能被两条记录声明）；`storages/` 仍是 `workspace.json` + `session_projcache.json` + `session_projcache/sessions/*.json` | 本次只做了**只读**核对（Inspect 查询 + 源码 grep + `/state` 探测），见 DEV_LOGS 2026-09-25 晚 |
+
+> 升级 DSH 后要先跑的三件事（都是只读）：`GET /api/dsh-workspace-migrate/state` 看插件是否挂载、
+> `cordis_inspect_query(client/Slots)` 看四个座位是否还在且注册 active、`Tool.listTools` 看工具是否注册。
+> 真正的迁移仍然建议先在临时工作区上跑一次 `workspace_migrate { action: "live", dryRun: true }`。
