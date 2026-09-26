@@ -1,9 +1,0 @@
-docs: split README into README.md (中文) + README.en.md, version 0.2.0
-
-- README.md is Chinese (the default) and README.en.md is English, with a
-  language line at the top of each pointing at the other; the badge anchors
-  follow each file (#兼容性 / #compatibility). Both halves were sliced out of
-  the bilingual single file by script, so no text was retyped.
-- version 1.0.0 -> 0.2.0 in package.json, in the engine's VERSION constant
-  (printed by --help and written into reports) and in both compatibility
-  tables; README.en.md is now listed in package.json files.
