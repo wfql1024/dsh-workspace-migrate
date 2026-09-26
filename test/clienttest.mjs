@@ -411,6 +411,13 @@ ok('the header entry is labelled', headerHtml.includes('迁移工作区'))
 	// The rail button must be a square target, not a padded strip: the entry is the only thing in
 	// the rail row, and a narrow one would sit off-centre in the owner's centered flex container.
 	ok('the rail styling is a square icon button', headChildren.length > 0 && /\.dwsm-entry-rail\{[^}]*width:36px;height:36px/.test(headChildren[0].textContent), 'the rail variant needs its own box')
+	// The prop is not the only signal: the label itself must never wrap (a soft-wrapped two-character
+	// label is what stacked vertically in the rail), and the layout frame's DOM attribute drops it
+	// even on a build that stops passing `wide`.
+	const css = headChildren.length > 0 ? headChildren[0].textContent : ''
+	ok('the label is declared nowrap', /\.dwsm-entry-label\{white-space:nowrap;\}/.test(css), 'a wrapping label is the original bug')
+	ok('the collapsed frame hides the label by DOM attribute, not only by prop', /\[data-sidebar-collapsed="true"\] \.dwsm-entry \.dwsm-entry-label\{display:none;\}/.test(css), 'the rail needs a prop-independent rule')
+	ok('and squares the button in the same state', /\[data-sidebar-collapsed="true"\] \.dwsm-entry\{[^}]*width:36px;height:36px/.test(css), 'the rail rule must carry the box, not only the label hiding')
 }
 
 console.log('\n[6] stylesheet injection')

@@ -59,11 +59,21 @@ window.__ModuleLoader__.load({
 			".dwsm-entry{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:8px;border:1px solid transparent;background:transparent;color:inherit;cursor:pointer;font-size:12px;font-family:inherit;}",
 			".dwsm-entry:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.15));}",
 			".dwsm-entry-icon{display:inline-flex;align-items:center;justify-content:center;font-size:14px;line-height:1;}",
+			// The label must never wrap: in a 56px rail a soft-wrapped two-character label stacks
+			// vertically, which is exactly what this entry used to look like.
+			".dwsm-entry-label{white-space:nowrap;}",
 			// Collapsed sidebar: the owner centers its children in a 56px rail, so the entry becomes a
 			// 36x36 icon-only button and the glyph carries the whole label (title/aria-label keep the
 			// name available to pointer and screen-reader users).
 			".dwsm-entry-rail{flex:none;justify-content:center;gap:0;width:36px;height:36px;padding:0;border-radius:12px;}",
 			".dwsm-entry-rail .dwsm-entry-icon{font-size:18px;}",
+			// Belt and braces for the same state, from the DOM instead of the prop: the layout frame
+			// carries `data-sidebar-collapsed="true"` on an ancestor of every sidebar seat
+			// (dsh-client-ui-layout: `"data-sidebar-collapsed": sidebarCollapsed || void 0`). If a
+			// build ever stops passing the seat's `wide`, the rail still loses the label.
+			"[data-sidebar-collapsed=\"true\"] .dwsm-entry .dwsm-entry-label{display:none;}",
+			"[data-sidebar-collapsed=\"true\"] .dwsm-entry{flex:none;justify-content:center;gap:0;width:36px;height:36px;padding:0;border-radius:12px;}",
+			"[data-sidebar-collapsed=\"true\"] .dwsm-entry .dwsm-entry-icon{font-size:18px;}",
 			".dwsm-modes{display:inline-flex;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.45));border-radius:16px;overflow:hidden;}",
 			".dwsm-mode{padding:5px 12px;border:none;background:transparent;color:var(--dsw-alias-label-secondary,inherit);cursor:pointer;font-size:12px;font-family:inherit;}",
 			".dwsm-mode-on{background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.2));color:var(--dsw-alias-label-primary,inherit);font-weight:500;}",

@@ -166,6 +166,14 @@ export const MUTATIONS = [
     to: '			const wide = true; /* MUTATION: the rail variant is never used */',
   },
   {
+    name: 'rail-attribute-rule-dropped',
+    file: 'client.js',
+    suite: 'test/clienttest.mjs',
+    breaks: 'the rail loses its prop-independent rule, so a build that stops passing `wide` stacks the label vertically again',
+    from: '			"[data-sidebar-collapsed=\\"true\\"] .dwsm-entry .dwsm-entry-label{display:none;}",',
+    to: '			"", /* MUTATION: the DOM-attribute rail rule is gone */',
+  },
+  {
     name: 'keep-does-not-create-destination',
     file: 'lib/live-move.mjs',
     suite: 'test/livetest.mjs',
